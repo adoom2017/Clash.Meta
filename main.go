@@ -3,13 +3,15 @@ package main
 import (
 	"flag"
 	"fmt"
-	"github.com/Dreamacro/clash/constant/features"
 	"os"
 	"os/signal"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"syscall"
+
+	"github.com/Dreamacro/clash/common/utils"
+	"github.com/Dreamacro/clash/constant/features"
 
 	"github.com/Dreamacro/clash/config"
 	C "github.com/Dreamacro/clash/constant"
@@ -30,6 +32,8 @@ var (
 	externalUI         string
 	externalController string
 	secret             string
+	password           string // config file is encrypted by this password
+	action             string //encrypt decrypt
 )
 
 func init() {
@@ -41,6 +45,8 @@ func init() {
 	flag.BoolVar(&geodataMode, "m", false, "set geodata mode")
 	flag.BoolVar(&version, "v", false, "show current version of clash")
 	flag.BoolVar(&testConfig, "t", false, "test configuration and exit")
+	flag.StringVar(&action, "action", "", "action with the config file, now support \"encrypt\" and \"decrypt\"")
+	flag.StringVar(&password, "p", "", "password for encrypted file, 16bytes(AES-128), 24bytes(AES-192), 32bytes(AES-256)")
 	flag.Parse()
 
 	flagset = map[string]bool{}
@@ -80,8 +86,39 @@ func main() {
 		C.SetConfig(configFile)
 	}
 
+	if action != "" {
+		if password == "" {
+			log.Fatalln("Password is empty.")
+		}
+
+		fileName := "config-" + action + filepath.Ext(C.Path.Config())
+		dstFile := filepath.Join(filepath.Dir(C.Path.Config()), fileName)
+
+		switch action {
+		case "encrypt":
+			err := utils.EncryptFile(C.Path.Config(), dstFile, password)
+			if err != nil {
+				fmt.Printf("encrypt file(%s) failed, error(%s).", C.Path.Config(), err.Error())
+				return
+			}
+
+		case "decrypt":
+			err := utils.DecryptFile(C.Path.Config(), dstFile, password)
+			if err != nil {
+				fmt.Printf("decrypt file(%s) failed, error(%s).", C.Path.Config(), err.Error())
+				return
+			}
+		}
+
+		return
+	}
+
 	if geodataMode {
 		C.GeodataMode = true
+	}
+
+	if password != "" {
+		C.SetPassword(password)
 	}
 
 	if err := config.Init(C.Path.HomeDir()); err != nil {

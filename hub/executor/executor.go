@@ -11,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/Dreamacro/clash/common/utils"
 	"github.com/Dreamacro/clash/ntp"
 
 	"github.com/Dreamacro/clash/adapter"
@@ -48,6 +49,14 @@ func readConfig(path string) ([]byte, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, err
+	}
+
+	// if password is not empty, decrypt the data by the password
+	if C.Path.Password() != "" {
+		data, err = utils.Decrypt(data, C.Path.Password())
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	if len(data) == 0 {

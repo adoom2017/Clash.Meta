@@ -32,6 +32,7 @@ type path struct {
 	homeDir         string
 	configFile      string
 	allowUnsafePath bool
+	password        string
 }
 
 // SetHomeDir is used to set the configuration path
@@ -44,12 +45,21 @@ func SetConfig(file string) {
 	Path.configFile = file
 }
 
+// SetPassword is used to set the encrypt password
+func SetPassword(password string) {
+	Path.password = password
+}
+
 func (p *path) HomeDir() string {
 	return p.homeDir
 }
 
 func (p *path) Config() string {
 	return p.configFile
+}
+
+func (p *path) Password() string {
+	return p.password
 }
 
 // Resolve return a absolute path or a relative path with homedir
