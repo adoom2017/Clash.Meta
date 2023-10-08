@@ -29,6 +29,11 @@
 - Remote providers, allowing users to get node lists remotely instead of hard-coding in config
 - Netfilter TCP redirecting. Deploy Clash on your Internet gateway with `iptables`.
 - Comprehensive HTTP RESTful API controller
+- Support encrypted(aes128, aes256, aes512) config file
+  > --action:
+  "encrypt" is used to generate encrypted config file
+  "decrypt" is used to decrypt the encrypted config file
+  > -p: password used to decrypt or encrypt, 16bytes(AES-128), 24bytes(AES-192), 32bytes(AES-256)
 
 ## Dashboard
 
