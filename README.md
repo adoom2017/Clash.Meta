@@ -30,10 +30,28 @@
 - Netfilter TCP redirecting. Deploy Clash on your Internet gateway with `iptables`.
 - Comprehensive HTTP RESTful API controller
 - Support encrypted(aes128, aes256, aes512) config file
-  > --action:
-  "encrypt" is used to generate encrypted config file
-  "decrypt" is used to decrypt the encrypted config file
-  > -p: password used to decrypt or encrypt, 16bytes(AES-128), 24bytes(AES-192), 32bytes(AES-256)
+
+## Encryption
+To generate an encrypted config file, you need a regular (unencrypted) config file.
+```shell
+clash.meta --action encrypt -f Path/To/RegularConfigFile -p YourPassword
+```
+The encrypted file will be in the same folder as the config file, named **config-encrypt.yaml**
+
+You can use the encrypted config file by adding the `-p` parameter to the normal command.
+```shell
+clash.meta -d Path/To/Config/Dir -p YourPassword
+```
+
+Also you can decrypt the encrypted config file by this command
+```shell
+clash.meta --action decrypt -f Path/To/EncryptedConfigFile -p YourPassword
+```
+The decrypted file will be in the same folder as the config file, named **config-decrypt.yaml**
+
+> if password length less than or equal to 16 bytes, will use AES-128
+> if password length greater to 16 bytes and less than or equal to 24 bytes, will use AES-192
+> if password length greater to 24 bytes, will use AES-256
 
 ## Dashboard
 

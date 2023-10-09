@@ -11,7 +11,7 @@ import (
 )
 
 // encrypt salt value
-var iv = []byte{35, 46, 57, 24, 85, 35, 24, 74, 87, 35, 88, 98, 66, 32, 14, 05}
+var iv = []byte{35, 46, 57, 24, 85, 35, 25, 74, 87, 35, 88, 98, 66, 33, 14, 05}
 
 // StringToBytes no mem copy
 func StringToBytes(s string) (b []byte) {
@@ -48,9 +48,40 @@ func decode(s []byte) []byte {
     return data
 }
 
+// AutoPadding auto padding src string with 0 to meet aes password length requirement
+func AutoPadding(src string) []byte {
+    srcLen := len(src)
+
+    // no need to padding
+    if srcLen == 16 || srcLen == 24 || srcLen == 32 {
+        return StringToBytes(src)
+    }
+
+    padLen := 0
+
+    switch {
+    case srcLen < 16:
+        padLen = 16 - srcLen
+    case srcLen < 24:
+        padLen = 24 - srcLen
+    case srcLen < 32:
+        padLen = 32 - srcLen
+    default:
+        // longger than 32bytes, truncate the string to 32bytes
+        return StringToBytes(src[:32])
+    }
+
+    padStr := make([]byte, padLen)
+    for i := 0; i < padLen; i++ {
+        padStr[i] = '0'
+    }
+
+    return append(StringToBytes(src), padStr...)
+}
+
 // Encrypt method is to encrypt or hide any classified text
 func Encrypt(text []byte, pwd string) ([]byte, error) {
-    block, err := aes.NewCipher([]byte(pwd))
+    block, err := aes.NewCipher(AutoPadding(pwd))
     if err != nil {
         return nil, err
     }
@@ -63,7 +94,7 @@ func Encrypt(text []byte, pwd string) ([]byte, error) {
 
 // Decrypt method is to extract back the encrypted text
 func Decrypt(text []byte, pwd string) ([]byte, error) {
-    block, err := aes.NewCipher([]byte(pwd))
+    block, err := aes.NewCipher(AutoPadding(pwd))
     if err != nil {
         return nil, err
     }
