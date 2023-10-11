@@ -149,6 +149,7 @@ func GetGeneral() *config.General {
 			ShadowSocksConfig: ports.ShadowSocksConfig,
 			VmessConfig:       ports.VmessConfig,
 			Authentication:    authenticator,
+			SkipAuthPrefixes:  inbound.SkipAuthPrefixes(),
 			AllowLan:          listener.AllowLan(),
 			BindAddress:       listener.BindAddress(),
 		},
@@ -173,6 +174,7 @@ func updateListeners(general *config.General, listeners map[string]C.InboundList
 
 	allowLan := general.AllowLan
 	listener.SetAllowLan(allowLan)
+	inbound.SetSkipAuthPrefixes(general.SkipAuthPrefixes)
 
 	bindAddress := general.BindAddress
 	listener.SetBindAddress(bindAddress)
