@@ -13,6 +13,7 @@ import (
 
 	"github.com/Dreamacro/clash/common/utils"
 	"github.com/Dreamacro/clash/ntp"
+	"github.com/howeyc/gopass"
 
 	"github.com/Dreamacro/clash/adapter"
 	"github.com/Dreamacro/clash/adapter/inbound"
@@ -51,14 +52,6 @@ func readConfig(path string) ([]byte, error) {
 		return nil, err
 	}
 
-	// if password is not empty, decrypt the data by the password
-	if C.Path.Password() != "" {
-		data, err = utils.Decrypt(data, C.Path.Password())
-		if err != nil {
-			return nil, err
-		}
-	}
-
 	if len(data) == 0 {
 		return nil, fmt.Errorf("configuration file %s is empty", path)
 	}
@@ -83,7 +76,31 @@ func ParseWithPath(path string) (*config.Config, error) {
 
 // ParseWithBytes config with buffer
 func ParseWithBytes(buf []byte) (*config.Config, error) {
-	return config.Parse(buf)
+	data, err := config.Parse(buf)
+	if err != nil {
+		// attempt to decode the buffer
+		if C.Path.Password() != "" {
+			buf, err = utils.Decrypt(buf, C.Path.Password())
+			if err != nil {
+				return nil, err
+			}
+		} else {
+			fmt.Printf("Password: ")
+			pass, err := gopass.GetPasswd()
+			if err != nil {
+				return nil, err
+			}
+
+			buf, err = utils.Decrypt(buf, string(pass))
+			if err != nil {
+				return nil, err
+			}
+		}
+
+		return config.Parse(buf)
+	}
+
+	return data, err
 }
 
 // ApplyConfig dispatch configure to all parts

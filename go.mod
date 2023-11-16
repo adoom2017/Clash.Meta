@@ -55,6 +55,8 @@ require (
 	lukechampine.com/blake3 v1.2.1
 )
 
+require golang.org/x/term v0.13.0 // indirect
+
 require (
 	github.com/RyuaNerin/go-krypto v1.0.2 // indirect
 	github.com/Yawning/aez v0.0.0-20211027044916-e49e68abd344 // indirect
@@ -75,6 +77,7 @@ require (
 	github.com/google/go-cmp v0.5.9 // indirect
 	github.com/google/pprof v0.0.0-20210407192527-94a9f03dee38 // indirect
 	github.com/hashicorp/yamux v0.1.1 // indirect
+	github.com/howeyc/gopass v0.0.0-20210920133722-c8aef6fb66ef
 	github.com/josharian/native v1.1.0 // indirect
 	github.com/klauspost/compress v1.16.7 // indirect
 	github.com/lufia/plan9stats v0.0.0-20211012122336-39d0f177ccd0 // indirect

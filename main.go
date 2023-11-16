@@ -88,7 +88,12 @@ func main() {
 
 	if action != "" {
 		if password == "" {
-			log.Fatalln("Password is empty.")
+			// log.Fatalln("Password is empty.")
+			pass, err := utils.SetPassword()
+			if err != nil {
+				log.Fatalln("No password found.")
+			}
+			password = pass
 		}
 
 		fileName := "config-" + action + filepath.Ext(C.Path.Config())

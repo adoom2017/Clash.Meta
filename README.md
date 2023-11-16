@@ -40,12 +40,12 @@ The encrypted file will be in the same folder as the config file, named **config
 
 You can use the encrypted config file by adding the `-p` parameter to the normal command.
 ```shell
-clash.meta -d Path/To/Config/Dir -p YourPassword
+clash.meta -d Path/To/Config/Dir -f Path/To/Encrypted/Config/File -p YourPassword
 ```
 
 Also you can decrypt the encrypted config file by this command
 ```shell
-clash.meta --action decrypt -f Path/To/EncryptedConfigFile -p YourPassword
+clash.meta --action decrypt -f Path/To/Encrypted/Config/File -p YourPassword
 ```
 The decrypted file will be in the same folder as the config file, named **config-decrypt.yaml**
 

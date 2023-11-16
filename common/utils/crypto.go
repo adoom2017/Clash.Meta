@@ -1,13 +1,18 @@
 package utils
 
 import (
-    "crypto/aes"
-    "crypto/cipher"
-    "encoding/base64"
-    "io"
-    "os"
-    "reflect"
-    "unsafe"
+	"bytes"
+	"crypto/aes"
+	"crypto/cipher"
+	"encoding/base64"
+	"errors"
+	"fmt"
+	"io"
+	"os"
+	"reflect"
+	"unsafe"
+
+	"github.com/howeyc/gopass"
 )
 
 // encrypt salt value
@@ -67,7 +72,7 @@ func AutoPadding(src string) []byte {
     case srcLen < 32:
         padLen = 32 - srcLen
     default:
-        // longger than 32bytes, truncate the string to 32bytes
+        // longger than 32 bytes, truncate the string to 32bytes
         return StringToBytes(src[:32])
     }
 
@@ -134,4 +139,25 @@ func fileOP(src, dst, pwd string, op opFunc) error {
     }
 
     return nil
+}
+
+// SetPassword ask user input password twice and get the password interactively
+func SetPassword() (string, error) {
+    fmt.Printf("Password: ")
+    pass, err := gopass.GetPasswd()
+    if err != nil {
+        return "", err
+    }
+
+    fmt.Printf("Repeat password:")
+    passRepeat, err := gopass.GetPasswd()
+    if err != nil {
+        return "", err
+    }
+
+    if !bytes.Equal(pass, passRepeat) {
+        return "", errors.New("twice input passwd is not match")
+    }
+
+    return string(pass), nil
 }
