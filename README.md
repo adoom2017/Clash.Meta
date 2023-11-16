@@ -52,6 +52,7 @@ The decrypted file will be in the same folder as the config file, named **config
 > if password length less than or equal to 16 bytes, will use AES-128
 > if password length greater to 16 bytes and less than or equal to 24 bytes, will use AES-192
 > if password length greater to 24 bytes, will use AES-256
+> if no ```-p``` parameter, need input password from prompt
 
 ## Dashboard
 
