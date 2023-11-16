@@ -92,16 +92,10 @@ func (h *ListenerHandler) NewConnection(ctx context.Context, conn net.Conn, meta
 	cMetadata := &C.Metadata{
 		NetWork: C.TCP,
 		Type:    h.Type,
-		Host:    metadata.Destination.Fqdn,
-		DstIP:   metadata.Destination.Addr,
-		DstPort: metadata.Destination.Port,
-		SrcIP:   metadata.Source.Addr,
-		SrcPort: metadata.Source.Port,
 	}
-	additions := combineAdditions(ctx, h.Additions, inbound.WithInAddr(conn.LocalAddr()))
-	for _, addition := range additions {
-		addition.Apply(cMetadata)
-	}
+	inbound.ApplyAdditions(cMetadata, inbound.WithDstAddr(metadata.Destination), inbound.WithSrcAddr(metadata.Source), inbound.WithInAddr(conn.LocalAddr()))
+	inbound.ApplyAdditions(cMetadata, getAdditions(ctx)...)
+	inbound.ApplyAdditions(cMetadata, h.Additions...)
 
 	h.Tunnel.HandleTCPConn(conn, cMetadata) // this goroutine must exit after conn unused
 	return nil
@@ -159,16 +153,10 @@ func (h *ListenerHandler) NewPacketConnection(ctx context.Context, conn network.
 		cMetadata := &C.Metadata{
 			NetWork: C.UDP,
 			Type:    h.Type,
-			Host:    dest.Fqdn,
-			DstIP:   dest.Addr,
-			DstPort: dest.Port,
-			SrcIP:   metadata.Source.Addr,
-			SrcPort: metadata.Source.Port,
 		}
-		additions := combineAdditions(ctx, h.Additions, inbound.WithInAddr(conn.LocalAddr()))
-		for _, addition := range additions {
-			addition.Apply(cMetadata)
-		}
+		inbound.ApplyAdditions(cMetadata, inbound.WithDstAddr(dest), inbound.WithSrcAddr(metadata.Source), inbound.WithInAddr(conn.LocalAddr()))
+		inbound.ApplyAdditions(cMetadata, getAdditions(ctx)...)
+		inbound.ApplyAdditions(cMetadata, h.Additions...)
 
 		h.Tunnel.HandleUDPPacket(cPacket, cMetadata)
 	}
@@ -205,12 +193,6 @@ func (c *packet) WriteBack(b []byte, addr net.Addr) (n int, err error) {
 		err = errors.New("address is invalid")
 		return
 	}
-	buff := buf.NewPacket()
-	defer buff.Release()
-	n, err = buff.Write(b)
-	if err != nil {
-		return
-	}
 
 	c.mutex.Lock()
 	defer c.mutex.Unlock()
@@ -219,6 +201,14 @@ func (c *packet) WriteBack(b []byte, addr net.Addr) (n int, err error) {
 		err = errors.New("writeBack to closed connection")
 		return
 	}
+
+	buff := buf.NewPacket()
+	defer buff.Release()
+	n, err = buff.Write(b)
+	if err != nil {
+		return
+	}
+
 	err = conn.WritePacket(buff, M.SocksaddrFromNet(addr))
 	if err != nil {
 		return

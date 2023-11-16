@@ -7,7 +7,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/Dreamacro/clash/common/atomic"
 	"github.com/Dreamacro/clash/common/cache"
 	"github.com/Dreamacro/clash/component/fakeip"
 	"github.com/Dreamacro/clash/component/geodata/router"
@@ -23,7 +22,6 @@ import (
 )
 
 type dnsClient interface {
-	Exchange(m *D.Msg) (msg *D.Msg, err error)
 	ExchangeContext(ctx context.Context, m *D.Msg) (msg *D.Msg, err error)
 	Address() string
 }
@@ -136,11 +134,6 @@ func (r *Resolver) shouldIPFallback(ip netip.Addr) bool {
 	return false
 }
 
-// Exchange a batch of dns request, and it use cache
-func (r *Resolver) Exchange(m *D.Msg) (msg *D.Msg, err error) {
-	return r.ExchangeContext(context.Background(), m)
-}
-
 // ExchangeContext a batch of dns request with context.Context, and it use cache
 func (r *Resolver) ExchangeContext(ctx context.Context, m *D.Msg) (msg *D.Msg, err error) {
 	if len(m.Question) == 0 {
@@ -195,7 +188,11 @@ func (r *Resolver) exchangeWithoutCache(ctx context.Context, m *D.Msg) (msg *D.M
 			msg := result.(*D.Msg)
 
 			if cache {
-				putMsgToCache(r.lruCache, q.String(), msg)
+				// OPT RRs MUST NOT be cached, forwarded, or stored in or loaded from master files.
+				msg.Extra = lo.Filter(msg.Extra, func(rr D.RR, index int) bool {
+					return rr.Header().Rrtype != D.TypeOPT
+				})
+				putMsgToCache(r.lruCache, q.String(), q, msg)
 			}
 		}()
 
@@ -206,10 +203,10 @@ func (r *Resolver) exchangeWithoutCache(ctx context.Context, m *D.Msg) (msg *D.M
 		}
 
 		if matched := r.matchPolicy(m); len(matched) != 0 {
-			result, cache, err = r.batchExchange(ctx, matched, m)
+			result, cache, err = batchExchange(ctx, matched, m)
 			return
 		}
-		result, cache, err = r.batchExchange(ctx, r.main, m)
+		result, cache, err = batchExchange(ctx, r.main, m)
 		return
 	}
 
@@ -249,13 +246,6 @@ func (r *Resolver) exchangeWithoutCache(ctx context.Context, m *D.Msg) (msg *D.M
 	}
 
 	return
-}
-
-func (r *Resolver) batchExchange(ctx context.Context, clients []dnsClient, m *D.Msg) (msg *D.Msg, cache bool, err error) {
-	ctx, cancel := context.WithTimeout(ctx, resolver.DefaultDNSTimeout)
-	defer cancel()
-
-	return batchExchange(ctx, clients, m)
 }
 
 func (r *Resolver) matchPolicy(m *D.Msg) []dnsClient {
@@ -381,7 +371,7 @@ func (r *Resolver) lookupIP(ctx context.Context, host string, dnsType uint16) (i
 func (r *Resolver) asyncExchange(ctx context.Context, client []dnsClient, msg *D.Msg) <-chan *result {
 	ch := make(chan *result, 1)
 	go func() {
-		res, _, err := r.batchExchange(ctx, client, msg)
+		res, _, err := batchExchange(ctx, client, msg)
 		ch <- &result{Msg: res, Error: err}
 	}()
 	return ch
@@ -398,7 +388,7 @@ func (r *Resolver) Invalid() bool {
 type NameServer struct {
 	Net          string
 	Addr         string
-	Interface    atomic.TypedValue[string]
+	Interface    string
 	ProxyAdapter C.ProxyAdapter
 	ProxyName    string
 	Params       map[string]string
@@ -408,7 +398,7 @@ type NameServer struct {
 type FallbackFilter struct {
 	GeoIP     bool
 	GeoIPCode string
-	IPCIDR    []*netip.Prefix
+	IPCIDR    []netip.Prefix
 	Domain    []string
 	GeoSite   []*router.DomainMatcher
 }
