@@ -15,7 +15,7 @@ import (
 )
 
 func HandleConn(c net.Conn, tunnel C.Tunnel, cache *cache.LruCache[string, bool], additions ...inbound.Addition) {
-	client := newClient(c.RemoteAddr(), tunnel, additions...)
+	client := newClient(c, tunnel, additions...)
 	defer client.CloseIdleConnections()
 
 	conn := N.NewBufferedConn(c)
@@ -100,6 +100,9 @@ func HandleConn(c net.Conn, tunnel C.Tunnel, cache *cache.LruCache[string, bool]
 
 func authenticate(request *http.Request, cache *cache.LruCache[string, bool]) *http.Response {
 	authenticator := authStore.Authenticator()
+	if inbound.SkipAuthRemoteAddress(request.RemoteAddr) {
+		authenticator = nil
+	}
 	if authenticator != nil {
 		credential := parseBasicProxyAuthorization(request)
 		if credential == "" {
