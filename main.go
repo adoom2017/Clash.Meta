@@ -12,6 +12,7 @@ import (
 
 	"github.com/Dreamacro/clash/common/utils"
 	"github.com/Dreamacro/clash/constant/features"
+	"github.com/howeyc/gopass"
 
 	"github.com/Dreamacro/clash/config"
 	C "github.com/Dreamacro/clash/constant"
@@ -81,20 +82,20 @@ func main() {
 	}
 
 	if action != "" {
-		if password == "" {
-			// log.Fatalln("Password is empty.")
-			pass, err := utils.SetPassword()
-			if err != nil {
-				log.Fatalln("No password found.")
-			}
-			password = pass
-		}
-
 		fileName := "config-" + action + filepath.Ext(C.Path.Config())
 		dstFile := filepath.Join(filepath.Dir(C.Path.Config()), fileName)
 
 		switch action {
 		case "encrypt":
+			if password == "" {
+				// log.Fatalln("Password is empty.")s
+				pass, err := utils.SetPassword()
+				if err != nil {
+					log.Fatalln("No password found.")
+				}
+				password = pass
+			}
+
 			err := utils.EncryptFile(C.Path.Config(), dstFile, password)
 			if err != nil {
 				fmt.Printf("encrypt file(%s) failed, error(%s).", C.Path.Config(), err.Error())
@@ -102,6 +103,17 @@ func main() {
 			}
 
 		case "decrypt":
+			if password == "" {
+				// log.Fatalln("Password is empty.")s
+				fmt.Printf("Password: ")
+				pass, err := gopass.GetPasswd()
+				if err != nil {
+					fmt.Println("No password found:", err)
+					return
+				}
+				password = utils.BytesToString(pass)
+			}
+
 			err := utils.DecryptFile(C.Path.Config(), dstFile, password)
 			if err != nil {
 				fmt.Printf("decrypt file(%s) failed, error(%s).", C.Path.Config(), err.Error())
