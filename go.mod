@@ -57,7 +57,7 @@ require (
 	lukechampine.com/blake3 v1.3.0
 )
 
-require golang.org/x/term v0.13.0 // indirect
+require golang.org/x/term v0.21.0 // indirect
 
 require (
 	github.com/RyuaNerin/go-krypto v1.2.4 // indirect

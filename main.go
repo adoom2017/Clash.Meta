@@ -79,8 +79,8 @@ func main() {
 		}
 	} else {
 		configFile = filepath.Join(C.Path.HomeDir(), C.Path.Config())
-		C.SetConfig(configFile)
 	}
+	C.SetConfig(configFile)
 
 	if action != "" {
 		fileName := "config-" + action + filepath.Ext(C.Path.Config())

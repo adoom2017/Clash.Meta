@@ -10,9 +10,11 @@ import (
 	"sync"
 	"time"
 
+	"github.com/howeyc/gopass"
 	"github.com/metacubex/mihomo/adapter"
 	"github.com/metacubex/mihomo/adapter/inbound"
 	"github.com/metacubex/mihomo/adapter/outboundgroup"
+	"github.com/metacubex/mihomo/common/utils"
 	"github.com/metacubex/mihomo/component/auth"
 	"github.com/metacubex/mihomo/component/ca"
 	"github.com/metacubex/mihomo/component/dialer"
@@ -96,9 +98,6 @@ func ParseWithBytes(buf []byte) (*config.Config, error) {
 
 		return config.Parse(buf)
 	}
-
-	return data, err
-}
 
 	return data, err
 }
