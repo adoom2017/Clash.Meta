@@ -1,17 +1,18 @@
 package inbound
 
 import (
-	C "github.com/Dreamacro/clash/constant"
-	LC "github.com/Dreamacro/clash/listener/config"
-	"github.com/Dreamacro/clash/listener/sing_shadowsocks"
-	"github.com/Dreamacro/clash/log"
+	C "github.com/metacubex/mihomo/constant"
+	LC "github.com/metacubex/mihomo/listener/config"
+	"github.com/metacubex/mihomo/listener/sing_shadowsocks"
+	"github.com/metacubex/mihomo/log"
 )
 
 type ShadowSocksOption struct {
 	BaseOption
-	Password string `inbound:"password"`
-	Cipher   string `inbound:"cipher"`
-	UDP      bool   `inbound:"udp,omitempty"`
+	Password  string    `inbound:"password"`
+	Cipher    string    `inbound:"cipher"`
+	UDP       bool      `inbound:"udp,omitempty"`
+	MuxOption MuxOption `inbound:"mux-option,omitempty"`
 }
 
 func (o ShadowSocksOption) Equal(config C.InboundConfig) bool {
@@ -34,11 +35,12 @@ func NewShadowSocks(options *ShadowSocksOption) (*ShadowSocks, error) {
 		Base:   base,
 		config: options,
 		ss: LC.ShadowsocksServer{
-			Enable:   true,
-			Listen:   base.RawAddress(),
-			Password: options.Password,
-			Cipher:   options.Cipher,
-			Udp:      options.UDP,
+			Enable:    true,
+			Listen:    base.RawAddress(),
+			Password:  options.Password,
+			Cipher:    options.Cipher,
+			Udp:       options.UDP,
+			MuxOption: options.MuxOption.Build(),
 		},
 	}, nil
 }

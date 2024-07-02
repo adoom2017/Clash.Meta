@@ -11,14 +11,14 @@ import (
 	"net/url"
 	"strings"
 
-	"github.com/Dreamacro/clash/adapter/inbound"
-	"github.com/Dreamacro/clash/adapter/outbound"
-	CN "github.com/Dreamacro/clash/common/net"
-	"github.com/Dreamacro/clash/common/sockopt"
-	C "github.com/Dreamacro/clash/constant"
-	LC "github.com/Dreamacro/clash/listener/config"
-	"github.com/Dreamacro/clash/listener/sing"
-	"github.com/Dreamacro/clash/log"
+	"github.com/metacubex/mihomo/adapter/inbound"
+	"github.com/metacubex/mihomo/adapter/outbound"
+	CN "github.com/metacubex/mihomo/common/net"
+	"github.com/metacubex/mihomo/common/sockopt"
+	C "github.com/metacubex/mihomo/constant"
+	LC "github.com/metacubex/mihomo/listener/config"
+	"github.com/metacubex/mihomo/listener/sing"
+	"github.com/metacubex/mihomo/log"
 
 	"github.com/metacubex/sing-quic/hysteria2"
 
@@ -42,10 +42,14 @@ func New(config LC.Hysteria2Server, tunnel C.Tunnel, additions ...inbound.Additi
 		}
 	}
 
-	h := &sing.ListenerHandler{
+	h, err := sing.NewListenerHandler(sing.ListenerConfig{
 		Tunnel:    tunnel,
 		Type:      C.HYSTERIA2,
 		Additions: additions,
+		MuxOption: config.MuxOption,
+	})
+	if err != nil {
+		return nil, err
 	}
 
 	sl = &Listener{false, config, nil, nil}
@@ -100,6 +104,12 @@ func New(config LC.Hysteria2Server, tunnel C.Tunnel, additions ...inbound.Additi
 		}
 	}
 
+	if config.UdpMTU == 0 {
+		// "1200" from quic-go's MaxDatagramSize
+		// "-3" from quic-go's DatagramFrame.MaxDataLen
+		config.UdpMTU = 1200 - 3
+	}
+
 	service, err := hysteria2.NewService[string](hysteria2.ServiceOptions{
 		Context:               context.Background(),
 		Logger:                log.SingLogger,
@@ -111,6 +121,7 @@ func New(config LC.Hysteria2Server, tunnel C.Tunnel, additions ...inbound.Additi
 		Handler:               h,
 		MasqueradeHandler:     masqueradeHandler,
 		CWND:                  config.CWND,
+		UdpMTU:                config.UdpMTU,
 	})
 	if err != nil {
 		return nil, err

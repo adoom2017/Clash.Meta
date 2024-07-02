@@ -4,10 +4,10 @@ import (
 	"net"
 	"net/netip"
 
-	"github.com/Dreamacro/clash/adapter/inbound"
-	"github.com/Dreamacro/clash/common/pool"
-	C "github.com/Dreamacro/clash/constant"
-	"github.com/Dreamacro/clash/transport/socks5"
+	"github.com/metacubex/mihomo/adapter/inbound"
+	"github.com/metacubex/mihomo/common/pool"
+	C "github.com/metacubex/mihomo/constant"
+	"github.com/metacubex/mihomo/transport/socks5"
 )
 
 type UDPListener struct {
@@ -78,6 +78,9 @@ func NewUDP(addr string, tunnel C.Tunnel, additions ...inbound.Addition) (*UDPLi
 			if err != nil {
 				continue
 			}
+
+			dscp, _ := getDSCP(oob[:oobn])
+			additions = append(additions, inbound.WithDSCP(dscp))
 
 			if rAddr.Addr().Is4() {
 				// try to unmap 4in6 address

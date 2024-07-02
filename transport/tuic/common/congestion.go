@@ -1,8 +1,8 @@
 package common
 
 import (
-	"github.com/Dreamacro/clash/transport/tuic/congestion"
-	congestionv2 "github.com/Dreamacro/clash/transport/tuic/congestion_v2"
+	"github.com/metacubex/mihomo/transport/tuic/congestion"
+	congestionv2 "github.com/metacubex/mihomo/transport/tuic/congestion_v2"
 
 	"github.com/metacubex/quic-go"
 	c "github.com/metacubex/quic-go/congestion"
@@ -22,7 +22,7 @@ func SetCongestionController(quicConn quic.Connection, cc string, cwnd int) {
 		quicConn.SetCongestionControl(
 			congestion.NewCubicSender(
 				congestion.DefaultClock{},
-				congestion.GetInitialPacketSize(quicConn.RemoteAddr()),
+				congestion.GetInitialPacketSize(quicConn),
 				false,
 			),
 		)
@@ -30,7 +30,7 @@ func SetCongestionController(quicConn quic.Connection, cc string, cwnd int) {
 		quicConn.SetCongestionControl(
 			congestion.NewCubicSender(
 				congestion.DefaultClock{},
-				congestion.GetInitialPacketSize(quicConn.RemoteAddr()),
+				congestion.GetInitialPacketSize(quicConn),
 				true,
 			),
 		)
@@ -38,7 +38,7 @@ func SetCongestionController(quicConn quic.Connection, cc string, cwnd int) {
 		quicConn.SetCongestionControl(
 			congestion.NewBBRSender(
 				congestion.DefaultClock{},
-				congestion.GetInitialPacketSize(quicConn.RemoteAddr()),
+				congestion.GetInitialPacketSize(quicConn),
 				c.ByteCount(cwnd)*congestion.InitialMaxDatagramSize,
 				congestion.DefaultBBRMaxCongestionWindow*congestion.InitialMaxDatagramSize,
 			),
@@ -49,7 +49,7 @@ func SetCongestionController(quicConn quic.Connection, cc string, cwnd int) {
 		quicConn.SetCongestionControl(
 			congestionv2.NewBbrSender(
 				congestionv2.DefaultClock{},
-				congestionv2.GetInitialPacketSize(quicConn.RemoteAddr()),
+				congestionv2.GetInitialPacketSize(quicConn),
 				c.ByteCount(cwnd),
 			),
 		)

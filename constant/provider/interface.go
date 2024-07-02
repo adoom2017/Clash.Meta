@@ -1,8 +1,8 @@
 package provider
 
 import (
-	"github.com/Dreamacro/clash/common/utils"
-	"github.com/Dreamacro/clash/constant"
+	"github.com/metacubex/mihomo/common/utils"
+	"github.com/metacubex/mihomo/constant"
 )
 
 // Vehicle Type
@@ -31,6 +31,7 @@ func (v VehicleType) String() string {
 type Vehicle interface {
 	Read() ([]byte, error)
 	Path() string
+	Proxy() string
 	Type() VehicleType
 }
 
@@ -73,6 +74,7 @@ type ProxyProvider interface {
 	HealthCheck()
 	Version() uint32
 	RegisterHealthCheckTask(url string, expectedStatus utils.IntRanges[uint16], filter string, interval uint)
+	HealthCheckURL() string
 }
 
 // RuleProvider interface
@@ -82,7 +84,7 @@ type RuleProvider interface {
 	Match(*constant.Metadata) bool
 	ShouldResolveIP() bool
 	ShouldFindProcess() bool
-	AsRule(adaptor string) constant.Rule
+	Strategy() any
 }
 
 // Rule Behavior
@@ -124,4 +126,10 @@ func (rf RuleFormat) String() string {
 	default:
 		return "Unknown"
 	}
+}
+
+type Tunnel interface {
+	Providers() map[string]ProxyProvider
+	RuleProviders() map[string]RuleProvider
+	RuleUpdateCallback() *utils.Callback[RuleProvider]
 }

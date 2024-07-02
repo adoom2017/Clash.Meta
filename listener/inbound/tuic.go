@@ -1,10 +1,10 @@
 package inbound
 
 import (
-	C "github.com/Dreamacro/clash/constant"
-	LC "github.com/Dreamacro/clash/listener/config"
-	"github.com/Dreamacro/clash/listener/tuic"
-	"github.com/Dreamacro/clash/log"
+	C "github.com/metacubex/mihomo/constant"
+	LC "github.com/metacubex/mihomo/listener/config"
+	"github.com/metacubex/mihomo/listener/tuic"
+	"github.com/metacubex/mihomo/log"
 )
 
 type TuicOption struct {
@@ -19,6 +19,7 @@ type TuicOption struct {
 	ALPN                  []string          `inbound:"alpn,omitempty"`
 	MaxUdpRelayPacketSize int               `inbound:"max-udp-relay-packet-size,omitempty"`
 	CWND                  int               `inbound:"cwnd,omitempty"`
+	MuxOption             MuxOption         `inbound:"mux-option,omitempty"`
 }
 
 func (o TuicOption) Equal(config C.InboundConfig) bool {
@@ -53,6 +54,7 @@ func NewTuic(options *TuicOption) (*Tuic, error) {
 			ALPN:                  options.ALPN,
 			MaxUdpRelayPacketSize: options.MaxUdpRelayPacketSize,
 			CWND:                  options.CWND,
+			MuxOption:             options.MuxOption.Build(),
 		},
 	}, nil
 }

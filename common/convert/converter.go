@@ -9,10 +9,10 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/Dreamacro/clash/log"
+	"github.com/metacubex/mihomo/log"
 )
 
-// ConvertsV2Ray convert V2Ray subscribe proxies data to clash proxies config
+// ConvertsV2Ray convert V2Ray subscribe proxies data to mihomo proxies config
 func ConvertsV2Ray(buf []byte) ([]map[string]any, error) {
 	data := DecodeBase64(buf)
 
@@ -68,7 +68,8 @@ func ConvertsV2Ray(buf []byte) ([]map[string]any, error) {
 			hysteria["skip-cert-verify"], _ = strconv.ParseBool(query.Get("insecure"))
 
 			proxies = append(proxies, hysteria)
-		case "hysteria2":
+
+		case "hysteria2", "hy2":
 			urlHysteria2, err := url.Parse(line)
 			if err != nil {
 				continue
@@ -79,7 +80,7 @@ func ConvertsV2Ray(buf []byte) ([]map[string]any, error) {
 			hysteria2 := make(map[string]any, 20)
 
 			hysteria2["name"] = name
-			hysteria2["type"] = scheme
+			hysteria2["type"] = "hysteria2"
 			hysteria2["server"] = urlHysteria2.Hostname()
 			if port := urlHysteria2.Port(); port != "" {
 				hysteria2["port"] = port
@@ -101,6 +102,7 @@ func ConvertsV2Ray(buf []byte) ([]map[string]any, error) {
 			hysteria2["up"] = query.Get("up")
 
 			proxies = append(proxies, hysteria2)
+
 		case "tuic":
 			// A temporary unofficial TUIC share link standard
 			// Modified from https://github.com/daeuniverse/dae/discussions/182
@@ -141,6 +143,8 @@ func ConvertsV2Ray(buf []byte) ([]map[string]any, error) {
 			if udpRelayMode := query.Get("udp_relay_mode"); udpRelayMode != "" {
 				tuic["udp-relay-mode"] = udpRelayMode
 			}
+
+			proxies = append(proxies, tuic)
 
 		case "trojan":
 			urlTrojan, err := url.Parse(line)
@@ -326,15 +330,38 @@ func ConvertsV2Ray(buf []byte) ([]map[string]any, error) {
 
 				vmess["h2-opts"] = h2Opts
 
-			case "ws":
+			case "ws", "httpupgrade":
 				headers := make(map[string]any)
 				wsOpts := make(map[string]any)
-				wsOpts["path"] = []string{"/"}
+				wsOpts["path"] = "/"
 				if host, ok := values["host"]; ok && host != "" {
 					headers["Host"] = host.(string)
 				}
 				if path, ok := values["path"]; ok && path != "" {
-					wsOpts["path"] = path.(string)
+					path := path.(string)
+					pathURL, err := url.Parse(path)
+					if err == nil {
+						query := pathURL.Query()
+						if earlyData := query.Get("ed"); earlyData != "" {
+							med, err := strconv.Atoi(earlyData)
+							if err == nil {
+								switch network {
+								case "ws":
+									wsOpts["max-early-data"] = med
+									wsOpts["early-data-header-name"] = "Sec-WebSocket-Protocol"
+								case "httpupgrade":
+									wsOpts["v2ray-http-upgrade-fast-open"] = true
+								}
+								query.Del("ed")
+								pathURL.RawQuery = query.Encode()
+								path = pathURL.String()
+							}
+						}
+						if earlyDataHeader := query.Get("eh"); earlyDataHeader != "" {
+							wsOpts["early-data-header-name"] = earlyDataHeader
+						}
+					}
+					wsOpts["path"] = path
 				}
 				wsOpts["headers"] = headers
 				vmess["ws-opts"] = wsOpts
@@ -403,14 +430,27 @@ func ConvertsV2Ray(buf []byte) ([]map[string]any, error) {
 			if query.Get("udp-over-tcp") == "true" || query.Get("uot") == "1" {
 				ss["udp-over-tcp"] = true
 			}
-			if strings.Contains(query.Get("plugin"), "obfs") {
-				obfsParams := strings.Split(query.Get("plugin"), ";")
-				ss["plugin"] = "obfs"
-				ss["plugin-opts"] = map[string]any{
-					"host": obfsParams[2][10:],
-					"mode": obfsParams[1][5:],
+			plugin := query.Get("plugin")
+			if strings.Contains(plugin, ";") {
+				pluginInfo, _ := url.ParseQuery("pluginName=" + strings.ReplaceAll(plugin, ";", "&"))
+				pluginName := pluginInfo.Get("pluginName")
+				if strings.Contains(pluginName, "obfs") {
+					ss["plugin"] = "obfs"
+					ss["plugin-opts"] = map[string]any{
+						"mode": pluginInfo.Get("obfs"),
+						"host": pluginInfo.Get("obfs-host"),
+					}
+				} else if strings.Contains(pluginName, "v2ray-plugin") {
+					ss["plugin"] = "v2ray-plugin"
+					ss["plugin-opts"] = map[string]any{
+						"mode": pluginInfo.Get("mode"),
+						"host": pluginInfo.Get("host"),
+						"path": pluginInfo.Get("path"),
+						"tls":  strings.Contains(plugin, "tls"),
+					}
 				}
 			}
+
 			proxies = append(proxies, ss)
 
 		case "ssr":

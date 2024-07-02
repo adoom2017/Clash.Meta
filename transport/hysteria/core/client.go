@@ -11,15 +11,15 @@ import (
 	"sync"
 	"time"
 
-	"github.com/Dreamacro/clash/transport/hysteria/obfs"
-	"github.com/Dreamacro/clash/transport/hysteria/pmtud_fix"
-	"github.com/Dreamacro/clash/transport/hysteria/transport"
-	"github.com/Dreamacro/clash/transport/hysteria/utils"
+	"github.com/metacubex/mihomo/transport/hysteria/obfs"
+	"github.com/metacubex/mihomo/transport/hysteria/pmtud_fix"
+	"github.com/metacubex/mihomo/transport/hysteria/transport"
+	"github.com/metacubex/mihomo/transport/hysteria/utils"
 
 	"github.com/lunixbochs/struc"
 	"github.com/metacubex/quic-go"
 	"github.com/metacubex/quic-go/congestion"
-	"github.com/zhangyunhao116/fastrand"
+	"github.com/metacubex/randv2"
 )
 
 var (
@@ -135,7 +135,7 @@ func (c *Client) handleControlStream(qs quic.Connection, stream quic.Stream) (bo
 
 func (c *Client) handleMessage(qs quic.Connection) {
 	for {
-		msg, err := qs.ReceiveMessage(context.Background())
+		msg, err := qs.ReceiveDatagram(context.Background())
 		if err != nil {
 			break
 		}
@@ -400,16 +400,17 @@ func (c *quicPktConn) WriteTo(p []byte, addr string) error {
 	// try no frag first
 	var msgBuf bytes.Buffer
 	_ = struc.Pack(&msgBuf, &msg)
-	err = c.Session.SendMessage(msgBuf.Bytes())
+	err = c.Session.SendDatagram(msgBuf.Bytes())
 	if err != nil {
-		if errSize, ok := err.(quic.ErrMessageTooLarge); ok {
+		var errSize *quic.DatagramTooLargeError
+		if errors.As(err, &errSize) {
 			// need to frag
-			msg.MsgID = uint16(fastrand.Intn(0xFFFF)) + 1 // msgID must be > 0 when fragCount > 1
-			fragMsgs := fragUDPMessage(msg, int(errSize))
+			msg.MsgID = uint16(randv2.IntN(0xFFFF)) + 1 // msgID must be > 0 when fragCount > 1
+			fragMsgs := fragUDPMessage(msg, int(errSize.MaxDatagramPayloadSize))
 			for _, fragMsg := range fragMsgs {
 				msgBuf.Reset()
 				_ = struc.Pack(&msgBuf, &fragMsg)
-				err = c.Session.SendMessage(msgBuf.Bytes())
+				err = c.Session.SendDatagram(msgBuf.Bytes())
 				if err != nil {
 					return err
 				}

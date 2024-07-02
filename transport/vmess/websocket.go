@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/rand"
 	"crypto/sha1"
 	"crypto/tls"
 	"encoding/base64"
@@ -18,14 +19,14 @@ import (
 	"strings"
 	"time"
 
-	"github.com/Dreamacro/clash/common/buf"
-	N "github.com/Dreamacro/clash/common/net"
-	tlsC "github.com/Dreamacro/clash/component/tls"
-	"github.com/Dreamacro/clash/log"
+	"github.com/metacubex/mihomo/common/buf"
+	N "github.com/metacubex/mihomo/common/net"
+	tlsC "github.com/metacubex/mihomo/component/tls"
+	"github.com/metacubex/mihomo/log"
 
 	"github.com/gobwas/ws"
 	"github.com/gobwas/ws/wsutil"
-	"github.com/zhangyunhao116/fastrand"
+	"github.com/metacubex/randv2"
 )
 
 type websocketConn struct {
@@ -49,21 +50,27 @@ type websocketWithEarlyDataConn struct {
 }
 
 type WebsocketConfig struct {
-	Host                string
-	Port                string
-	Path                string
-	Headers             http.Header
-	TLS                 bool
-	TLSConfig           *tls.Config
-	MaxEarlyData        int
-	EarlyDataHeaderName string
-	ClientFingerprint   string
-	V2rayHttpUpgrade    bool
+	Host                     string
+	Port                     string
+	Path                     string
+	Headers                  http.Header
+	TLS                      bool
+	TLSConfig                *tls.Config
+	MaxEarlyData             int
+	EarlyDataHeaderName      string
+	ClientFingerprint        string
+	V2rayHttpUpgrade         bool
+	V2rayHttpUpgradeFastOpen bool
 }
 
 // Read implements net.Conn.Read()
 // modify from gobwas/ws/wsutil.readData
 func (wsc *websocketConn) Read(b []byte) (n int, err error) {
+	defer func() { // avoid gobwas/ws pbytes.GetLen panic
+		if value := recover(); value != nil {
+			err = fmt.Errorf("websocket error: %s", value)
+		}
+	}()
 	var header ws.Header
 	for {
 		n, err = wsc.reader.Read(b)
@@ -144,7 +151,7 @@ func (wsc *websocketConn) WriteBuffer(buffer *buf.Buffer) error {
 	}
 
 	if wsc.state.ClientSide() {
-		maskKey := fastrand.Uint32()
+		maskKey := randv2.Uint32()
 		binary.LittleEndian.PutUint32(header[1+payloadBitLength:], maskKey)
 		N.MaskWebSocket(maskKey, data)
 	}
@@ -332,6 +339,10 @@ func streamWebsocketConn(ctx context.Context, conn net.Conn, c *WebsocketConfig,
 		RawQuery: u.RawQuery,
 	}
 
+	if !strings.HasPrefix(uri.Path, "/") {
+		uri.Path = "/" + uri.Path
+	}
+
 	if c.TLS {
 		uri.Scheme = "wss"
 		config := c.TLSConfig
@@ -388,7 +399,7 @@ func streamWebsocketConn(ctx context.Context, conn net.Conn, c *WebsocketConfig,
 		const nonceKeySize = 16
 		// NOTE: bts does not escape.
 		bts := make([]byte, nonceKeySize)
-		if _, err = fastrand.Read(bts); err != nil {
+		if _, err = rand.Read(bts); err != nil {
 			return nil, fmt.Errorf("rand read error: %w", err)
 		}
 		secKey = base64.StdEncoding.EncodeToString(bts)
@@ -415,6 +426,22 @@ func streamWebsocketConn(ctx context.Context, conn net.Conn, c *WebsocketConfig,
 		return nil, err
 	}
 	bufferedConn := N.NewBufferedConn(conn)
+
+	if c.V2rayHttpUpgrade && c.V2rayHttpUpgradeFastOpen {
+		return N.NewEarlyConn(bufferedConn, func() error {
+			response, err := http.ReadResponse(bufferedConn.Reader(), request)
+			if err != nil {
+				return err
+			}
+			if response.StatusCode != http.StatusSwitchingProtocols ||
+				!strings.EqualFold(response.Header.Get("Connection"), "upgrade") ||
+				!strings.EqualFold(response.Header.Get("Upgrade"), "websocket") {
+				return fmt.Errorf("unexpected status: %s", response.Status)
+			}
+			return nil
+		}), nil
+	}
+
 	response, err := http.ReadResponse(bufferedConn.Reader(), request)
 	if err != nil {
 		return nil, err
@@ -554,7 +581,14 @@ func StreamUpgradedWebsocketConn(w http.ResponseWriter, r *http.Request) (net.Co
 	}
 
 	if edBuf := decodeXray0rtt(r.Header); len(edBuf) > 0 {
-		conn = N.NewCachedConn(conn, edBuf)
+		appendOk := false
+		if bufConn, ok := conn.(*N.BufferedConn); ok {
+			appendOk = bufConn.AppendData(edBuf)
+		}
+		if !appendOk {
+			conn = N.NewCachedConn(conn, edBuf)
+		}
+
 	}
 
 	return conn, nil

@@ -9,22 +9,22 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/Dreamacro/clash/component/ebpf"
-	C "github.com/Dreamacro/clash/constant"
-	"github.com/Dreamacro/clash/listener/autoredir"
-	LC "github.com/Dreamacro/clash/listener/config"
-	"github.com/Dreamacro/clash/listener/http"
-	"github.com/Dreamacro/clash/listener/mixed"
-	"github.com/Dreamacro/clash/listener/redir"
-	embedSS "github.com/Dreamacro/clash/listener/shadowsocks"
-	"github.com/Dreamacro/clash/listener/sing_shadowsocks"
-	"github.com/Dreamacro/clash/listener/sing_tun"
-	"github.com/Dreamacro/clash/listener/sing_vmess"
-	"github.com/Dreamacro/clash/listener/socks"
-	"github.com/Dreamacro/clash/listener/tproxy"
-	"github.com/Dreamacro/clash/listener/tuic"
-	LT "github.com/Dreamacro/clash/listener/tunnel"
-	"github.com/Dreamacro/clash/log"
+	"github.com/metacubex/mihomo/component/ebpf"
+	C "github.com/metacubex/mihomo/constant"
+	"github.com/metacubex/mihomo/listener/autoredir"
+	LC "github.com/metacubex/mihomo/listener/config"
+	"github.com/metacubex/mihomo/listener/http"
+	"github.com/metacubex/mihomo/listener/mixed"
+	"github.com/metacubex/mihomo/listener/redir"
+	embedSS "github.com/metacubex/mihomo/listener/shadowsocks"
+	"github.com/metacubex/mihomo/listener/sing_shadowsocks"
+	"github.com/metacubex/mihomo/listener/sing_tun"
+	"github.com/metacubex/mihomo/listener/sing_vmess"
+	"github.com/metacubex/mihomo/listener/socks"
+	"github.com/metacubex/mihomo/listener/tproxy"
+	"github.com/metacubex/mihomo/listener/tuic"
+	LT "github.com/metacubex/mihomo/listener/tunnel"
+	"github.com/metacubex/mihomo/log"
 
 	"github.com/samber/lo"
 )
@@ -818,6 +818,13 @@ func hasTunConfigChange(tunConf *LC.Tun) bool {
 		LastTunConf.AutoRoute != tunConf.AutoRoute ||
 		LastTunConf.AutoDetectInterface != tunConf.AutoDetectInterface ||
 		LastTunConf.MTU != tunConf.MTU ||
+		LastTunConf.GSO != tunConf.GSO ||
+		LastTunConf.GSOMaxSize != tunConf.GSOMaxSize ||
+		LastTunConf.IPRoute2TableIndex != tunConf.IPRoute2TableIndex ||
+		LastTunConf.IPRoute2RuleIndex != tunConf.IPRoute2RuleIndex ||
+		LastTunConf.AutoRedirect != tunConf.AutoRedirect ||
+		LastTunConf.AutoRedirectInputMark != tunConf.AutoRedirectInputMark ||
+		LastTunConf.AutoRedirectOutputMark != tunConf.AutoRedirectOutputMark ||
 		LastTunConf.StrictRoute != tunConf.StrictRoute ||
 		LastTunConf.EndpointIndependentNat != tunConf.EndpointIndependentNat ||
 		LastTunConf.UDPTimeout != tunConf.UDPTimeout ||
@@ -831,6 +838,22 @@ func hasTunConfigChange(tunConf *LC.Tun) bool {
 
 	sort.Slice(tunConf.DNSHijack, func(i, j int) bool {
 		return tunConf.DNSHijack[i] < tunConf.DNSHijack[j]
+	})
+
+	sort.Slice(tunConf.RouteAddress, func(i, j int) bool {
+		return tunConf.RouteAddress[i].String() < tunConf.RouteAddress[j].String()
+	})
+
+	sort.Slice(tunConf.RouteAddressSet, func(i, j int) bool {
+		return tunConf.RouteAddressSet[i] < tunConf.RouteAddressSet[j]
+	})
+
+	sort.Slice(tunConf.RouteExcludeAddress, func(i, j int) bool {
+		return tunConf.RouteExcludeAddress[i].String() < tunConf.RouteExcludeAddress[j].String()
+	})
+
+	sort.Slice(tunConf.RouteExcludeAddressSet, func(i, j int) bool {
+		return tunConf.RouteExcludeAddressSet[i] < tunConf.RouteExcludeAddressSet[j]
 	})
 
 	sort.Slice(tunConf.Inet4Address, func(i, j int) bool {
@@ -855,6 +878,14 @@ func hasTunConfigChange(tunConf *LC.Tun) bool {
 
 	sort.Slice(tunConf.Inet6RouteExcludeAddress, func(i, j int) bool {
 		return tunConf.Inet6RouteExcludeAddress[i].String() < tunConf.Inet6RouteExcludeAddress[j].String()
+	})
+
+	sort.Slice(tunConf.IncludeInterface, func(i, j int) bool {
+		return tunConf.IncludeInterface[i] < tunConf.IncludeInterface[j]
+	})
+
+	sort.Slice(tunConf.ExcludeInterface, func(i, j int) bool {
+		return tunConf.ExcludeInterface[i] < tunConf.ExcludeInterface[j]
 	})
 
 	sort.Slice(tunConf.IncludeUID, func(i, j int) bool {
@@ -886,12 +917,18 @@ func hasTunConfigChange(tunConf *LC.Tun) bool {
 	})
 
 	if !slices.Equal(tunConf.DNSHijack, LastTunConf.DNSHijack) ||
+		!slices.Equal(tunConf.RouteAddress, LastTunConf.RouteAddress) ||
+		!slices.Equal(tunConf.RouteAddressSet, LastTunConf.RouteAddressSet) ||
+		!slices.Equal(tunConf.RouteExcludeAddress, LastTunConf.RouteExcludeAddress) ||
+		!slices.Equal(tunConf.RouteExcludeAddressSet, LastTunConf.RouteExcludeAddressSet) ||
 		!slices.Equal(tunConf.Inet4Address, LastTunConf.Inet4Address) ||
 		!slices.Equal(tunConf.Inet6Address, LastTunConf.Inet6Address) ||
 		!slices.Equal(tunConf.Inet4RouteAddress, LastTunConf.Inet4RouteAddress) ||
 		!slices.Equal(tunConf.Inet6RouteAddress, LastTunConf.Inet6RouteAddress) ||
 		!slices.Equal(tunConf.Inet4RouteExcludeAddress, LastTunConf.Inet4RouteExcludeAddress) ||
 		!slices.Equal(tunConf.Inet6RouteExcludeAddress, LastTunConf.Inet6RouteExcludeAddress) ||
+		!slices.Equal(tunConf.IncludeInterface, LastTunConf.IncludeInterface) ||
+		!slices.Equal(tunConf.ExcludeInterface, LastTunConf.ExcludeInterface) ||
 		!slices.Equal(tunConf.IncludeUID, LastTunConf.IncludeUID) ||
 		!slices.Equal(tunConf.IncludeUIDRange, LastTunConf.IncludeUIDRange) ||
 		!slices.Equal(tunConf.ExcludeUID, LastTunConf.ExcludeUID) ||

@@ -4,7 +4,7 @@ import (
 	"bufio"
 	"net"
 
-	"github.com/Dreamacro/clash/common/buf"
+	"github.com/metacubex/mihomo/common/buf"
 )
 
 var _ ExtendedConn = (*BufferedConn)(nil)
@@ -84,9 +84,9 @@ func (c *BufferedConn) ReadCached() *buf.Buffer { // call in sing/common/bufio.C
 		length := c.r.Buffered()
 		b, _ := c.r.Peek(length)
 		_, _ = c.r.Discard(length)
-		c.r = nil // drop bufio.Reader to let gc can clean up its internal buf
 		return buf.As(b)
 	}
+	c.r = nil // drop bufio.Reader to let gc can clean up its internal buf
 	return nil
 }
 

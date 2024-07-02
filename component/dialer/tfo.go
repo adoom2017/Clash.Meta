@@ -2,7 +2,6 @@ package dialer
 
 import (
 	"context"
-	"github.com/sagernet/tfo-go"
 	"io"
 	"net"
 	"time"
@@ -66,14 +65,14 @@ func (c *tfoConn) Close() error {
 
 func (c *tfoConn) LocalAddr() net.Addr {
 	if c.Conn == nil {
-		return nil
+		return &net.TCPAddr{}
 	}
 	return c.Conn.LocalAddr()
 }
 
 func (c *tfoConn) RemoteAddr() net.Addr {
 	if c.Conn == nil {
-		return nil
+		return &net.TCPAddr{}
 	}
 	return c.Conn.RemoteAddr()
 }
@@ -120,17 +119,4 @@ func (c *tfoConn) ReaderReplaceable() bool {
 
 func (c *tfoConn) WriterReplaceable() bool {
 	return c.Conn != nil
-}
-
-func dialTFO(ctx context.Context, netDialer net.Dialer, network, address string) (net.Conn, error) {
-	ctx, cancel := context.WithCancel(ctx)
-	dialer := tfo.Dialer{Dialer: netDialer, DisableTFO: false}
-	return &tfoConn{
-		dialed: make(chan bool, 1),
-		cancel: cancel,
-		ctx:    ctx,
-		dialFn: func(ctx context.Context, earlyData []byte) (net.Conn, error) {
-			return dialer.DialContext(ctx, network, address, earlyData)
-		},
-	}, nil
 }

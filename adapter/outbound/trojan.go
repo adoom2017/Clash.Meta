@@ -3,19 +3,21 @@ package outbound
 import (
 	"context"
 	"crypto/tls"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
 	"strconv"
 
-	N "github.com/Dreamacro/clash/common/net"
-	"github.com/Dreamacro/clash/component/ca"
-	"github.com/Dreamacro/clash/component/dialer"
-	"github.com/Dreamacro/clash/component/proxydialer"
-	tlsC "github.com/Dreamacro/clash/component/tls"
-	C "github.com/Dreamacro/clash/constant"
-	"github.com/Dreamacro/clash/transport/gun"
-	"github.com/Dreamacro/clash/transport/trojan"
+	N "github.com/metacubex/mihomo/common/net"
+	"github.com/metacubex/mihomo/component/ca"
+	"github.com/metacubex/mihomo/component/dialer"
+	"github.com/metacubex/mihomo/component/proxydialer"
+	tlsC "github.com/metacubex/mihomo/component/tls"
+	C "github.com/metacubex/mihomo/constant"
+	"github.com/metacubex/mihomo/transport/gun"
+	"github.com/metacubex/mihomo/transport/shadowsocks/core"
+	"github.com/metacubex/mihomo/transport/trojan"
 )
 
 type Trojan struct {
@@ -29,6 +31,8 @@ type Trojan struct {
 	transport    *gun.TransportWrap
 
 	realityConfig *tlsC.RealityConfig
+
+	ssCipher core.Cipher
 }
 
 type TrojanOption struct {
@@ -46,17 +50,27 @@ type TrojanOption struct {
 	RealityOpts       RealityOptions `proxy:"reality-opts,omitempty"`
 	GrpcOpts          GrpcOptions    `proxy:"grpc-opts,omitempty"`
 	WSOpts            WSOptions      `proxy:"ws-opts,omitempty"`
+	SSOpts            TrojanSSOption `proxy:"ss-opts,omitempty"`
 	ClientFingerprint string         `proxy:"client-fingerprint,omitempty"`
+}
+
+// TrojanSSOption from https://github.com/p4gefau1t/trojan-go/blob/v0.10.6/tunnel/shadowsocks/config.go#L5
+type TrojanSSOption struct {
+	Enabled  bool   `proxy:"enabled,omitempty"`
+	Method   string `proxy:"method,omitempty"`
+	Password string `proxy:"password,omitempty"`
 }
 
 func (t *Trojan) plainStream(ctx context.Context, c net.Conn) (net.Conn, error) {
 	if t.option.Network == "ws" {
 		host, port, _ := net.SplitHostPort(t.addr)
 		wsOpts := &trojan.WebsocketOption{
-			Host:             host,
-			Port:             port,
-			Path:             t.option.WSOpts.Path,
-			V2rayHttpUpgrade: t.option.WSOpts.V2rayHttpUpgrade,
+			Host:                     host,
+			Port:                     port,
+			Path:                     t.option.WSOpts.Path,
+			V2rayHttpUpgrade:         t.option.WSOpts.V2rayHttpUpgrade,
+			V2rayHttpUpgradeFastOpen: t.option.WSOpts.V2rayHttpUpgradeFastOpen,
+			Headers:                  http.Header{},
 		}
 
 		if t.option.SNI != "" {
@@ -64,11 +78,9 @@ func (t *Trojan) plainStream(ctx context.Context, c net.Conn) (net.Conn, error) 
 		}
 
 		if len(t.option.WSOpts.Headers) != 0 {
-			header := http.Header{}
 			for key, value := range t.option.WSOpts.Headers {
-				header.Add(key, value)
+				wsOpts.Headers.Add(key, value)
 			}
-			wsOpts.Headers = header
 		}
 
 		return t.instance.StreamWebsocketConn(ctx, c, wsOpts)
@@ -95,6 +107,10 @@ func (t *Trojan) StreamConnContext(ctx context.Context, c net.Conn, metadata *C.
 		return nil, fmt.Errorf("%s connect error: %w", t.addr, err)
 	}
 
+	if t.ssCipher != nil {
+		c = t.ssCipher.StreamConn(c)
+	}
+
 	if metadata.NetWork == C.UDP {
 		err = t.instance.WriteHeader(c, trojan.CommandUDP, serializesSocksAddr(metadata))
 		return c, err
@@ -110,6 +126,10 @@ func (t *Trojan) DialContext(ctx context.Context, metadata *C.Metadata, opts ...
 		c, err := gun.StreamGunWithTransport(t.transport, t.gunConfig)
 		if err != nil {
 			return nil, err
+		}
+
+		if t.ssCipher != nil {
+			c = t.ssCipher.StreamConn(c)
 		}
 
 		if err = t.instance.WriteHeader(c, trojan.CommandTCP, serializesSocksAddr(metadata)); err != nil {
@@ -161,6 +181,11 @@ func (t *Trojan) ListenPacketContext(ctx context.Context, metadata *C.Metadata, 
 		defer func(c net.Conn) {
 			safeConnClose(c, err)
 		}(c)
+
+		if t.ssCipher != nil {
+			c = t.ssCipher.StreamConn(c)
+		}
+
 		err = t.instance.WriteHeader(c, trojan.CommandUDP, serializesSocksAddr(metadata))
 		if err != nil {
 			return nil, err
@@ -191,6 +216,10 @@ func (t *Trojan) ListenPacketWithDialer(ctx context.Context, dialer C.Dialer, me
 	c, err = t.plainStream(ctx, c)
 	if err != nil {
 		return nil, fmt.Errorf("%s connect error: %w", t.addr, err)
+	}
+
+	if t.ssCipher != nil {
+		c = t.ssCipher.StreamConn(c)
 	}
 
 	err = t.instance.WriteHeader(c, trojan.CommandUDP, serializesSocksAddr(metadata))
@@ -256,6 +285,20 @@ func NewTrojan(option TrojanOption) (*Trojan, error) {
 		return nil, err
 	}
 	tOption.Reality = t.realityConfig
+
+	if option.SSOpts.Enabled {
+		if option.SSOpts.Password == "" {
+			return nil, errors.New("empty password")
+		}
+		if option.SSOpts.Method == "" {
+			option.SSOpts.Method = "AES-128-GCM"
+		}
+		ciph, err := core.PickCipher(option.SSOpts.Method, nil, option.SSOpts.Password)
+		if err != nil {
+			return nil, err
+		}
+		t.ssCipher = ciph
+	}
 
 	if option.Network == "grpc" {
 		dialFn := func(network, addr string) (net.Conn, error) {

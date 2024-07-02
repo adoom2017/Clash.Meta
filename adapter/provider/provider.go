@@ -6,19 +6,20 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"reflect"
 	"runtime"
 	"strings"
 	"time"
 
-	"github.com/Dreamacro/clash/adapter"
-	"github.com/Dreamacro/clash/common/convert"
-	"github.com/Dreamacro/clash/common/utils"
-	clashHttp "github.com/Dreamacro/clash/component/http"
-	"github.com/Dreamacro/clash/component/resource"
-	C "github.com/Dreamacro/clash/constant"
-	types "github.com/Dreamacro/clash/constant/provider"
-	"github.com/Dreamacro/clash/log"
-	"github.com/Dreamacro/clash/tunnel/statistic"
+	"github.com/metacubex/mihomo/adapter"
+	"github.com/metacubex/mihomo/common/convert"
+	"github.com/metacubex/mihomo/common/utils"
+	mihomoHttp "github.com/metacubex/mihomo/component/http"
+	"github.com/metacubex/mihomo/component/resource"
+	C "github.com/metacubex/mihomo/constant"
+	types "github.com/metacubex/mihomo/constant/provider"
+	"github.com/metacubex/mihomo/log"
+	"github.com/metacubex/mihomo/tunnel/statistic"
 
 	"github.com/dlclark/regexp2"
 	"gopkg.in/yaml.v3"
@@ -52,6 +53,7 @@ func (pp *proxySetProvider) MarshalJSON() ([]byte, error) {
 		"vehicleType":      pp.VehicleType().String(),
 		"proxies":          pp.Proxies(),
 		"testUrl":          pp.healthCheck.url,
+		"expectedStatus":   pp.healthCheck.expectedStatus.String(),
 		"updatedAt":        pp.UpdatedAt,
 		"subscriptionInfo": pp.subscriptionInfo,
 	})
@@ -100,6 +102,10 @@ func (pp *proxySetProvider) Touch() {
 	pp.healthCheck.touch()
 }
 
+func (pp *proxySetProvider) HealthCheckURL() string {
+	return pp.healthCheck.url
+}
+
 func (pp *proxySetProvider) RegisterHealthCheckTask(url string, expectedStatus utils.IntRanges[uint16], filter string, interval uint) {
 	pp.healthCheck.registerHealthCheckTask(url, expectedStatus, filter, interval)
 }
@@ -119,8 +125,8 @@ func (pp *proxySetProvider) getSubscriptionInfo() {
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), time.Second*90)
 		defer cancel()
-		resp, err := clashHttp.HttpRequest(ctx, pp.Vehicle().(*resource.HTTPVehicle).Url(),
-			http.MethodGet, http.Header{"User-Agent": {"clash"}}, nil)
+		resp, err := mihomoHttp.HttpRequestWithProxy(ctx, pp.Vehicle().(*resource.HTTPVehicle).Url(),
+			http.MethodGet, http.Header{"User-Agent": {C.UA}}, nil, pp.Vehicle().Proxy())
 		if err != nil {
 			return
 		}
@@ -128,8 +134,8 @@ func (pp *proxySetProvider) getSubscriptionInfo() {
 
 		userInfoStr := strings.TrimSpace(resp.Header.Get("subscription-userinfo"))
 		if userInfoStr == "" {
-			resp2, err := clashHttp.HttpRequest(ctx, pp.Vehicle().(*resource.HTTPVehicle).Url(),
-				http.MethodGet, http.Header{"User-Agent": {"Quantumultx"}}, nil)
+			resp2, err := mihomoHttp.HttpRequestWithProxy(ctx, pp.Vehicle().(*resource.HTTPVehicle).Url(),
+				http.MethodGet, http.Header{"User-Agent": {"Quantumultx"}}, nil, pp.Vehicle().Proxy())
 			if err != nil {
 				return
 			}
@@ -163,8 +169,8 @@ func stopProxyProvider(pd *ProxySetProvider) {
 	_ = pd.Fetcher.Destroy()
 }
 
-func NewProxySetProvider(name string, interval time.Duration, filter string, excludeFilter string, excludeType string, dialerProxy string, vehicle types.Vehicle, hc *HealthCheck) (*ProxySetProvider, error) {
-	excludeFilterReg, err := regexp2.Compile(excludeFilter, 0)
+func NewProxySetProvider(name string, interval time.Duration, filter string, excludeFilter string, excludeType string, dialerProxy string, override OverrideSchema, vehicle types.Vehicle, hc *HealthCheck) (*ProxySetProvider, error) {
+	excludeFilterReg, err := regexp2.Compile(excludeFilter, regexp2.None)
 	if err != nil {
 		return nil, fmt.Errorf("invalid excludeFilter regex: %w", err)
 	}
@@ -175,7 +181,7 @@ func NewProxySetProvider(name string, interval time.Duration, filter string, exc
 
 	var filterRegs []*regexp2.Regexp
 	for _, filter := range strings.Split(filter, "`") {
-		filterReg, err := regexp2.Compile(filter, 0)
+		filterReg, err := regexp2.Compile(filter, regexp2.None)
 		if err != nil {
 			return nil, fmt.Errorf("invalid filter regex: %w", err)
 		}
@@ -191,7 +197,7 @@ func NewProxySetProvider(name string, interval time.Duration, filter string, exc
 		healthCheck: hc,
 	}
 
-	fetcher := resource.NewFetcher[[]C.Proxy](name, interval, vehicle, proxiesParseAndFilter(filter, excludeFilter, excludeTypeArray, filterRegs, excludeFilterReg, dialerProxy), proxiesOnUpdate(pd))
+	fetcher := resource.NewFetcher[[]C.Proxy](name, interval, vehicle, proxiesParseAndFilter(filter, excludeFilter, excludeTypeArray, filterRegs, excludeFilterReg, dialerProxy, override), proxiesOnUpdate(pd))
 	pd.Fetcher = fetcher
 	wrapper := &ProxySetProvider{pd}
 	runtime.SetFinalizer(wrapper, stopProxyProvider)
@@ -212,11 +218,12 @@ type compatibleProvider struct {
 
 func (cp *compatibleProvider) MarshalJSON() ([]byte, error) {
 	return json.Marshal(map[string]any{
-		"name":        cp.Name(),
-		"type":        cp.Type().String(),
-		"vehicleType": cp.VehicleType().String(),
-		"proxies":     cp.Proxies(),
-		"testUrl":     cp.healthCheck.url,
+		"name":           cp.Name(),
+		"type":           cp.Type().String(),
+		"vehicleType":    cp.VehicleType().String(),
+		"proxies":        cp.Proxies(),
+		"testUrl":        cp.healthCheck.url,
+		"expectedStatus": cp.healthCheck.expectedStatus.String(),
 	})
 }
 
@@ -237,6 +244,9 @@ func (cp *compatibleProvider) Update() error {
 }
 
 func (cp *compatibleProvider) Initial() error {
+	if cp.healthCheck.interval != 0 && cp.healthCheck.url != "" {
+		cp.HealthCheck()
+	}
 	return nil
 }
 
@@ -254,6 +264,10 @@ func (cp *compatibleProvider) Proxies() []C.Proxy {
 
 func (cp *compatibleProvider) Touch() {
 	cp.healthCheck.touch()
+}
+
+func (cp *compatibleProvider) HealthCheckURL() string {
+	return cp.healthCheck.url
 }
 
 func (cp *compatibleProvider) RegisterHealthCheckTask(url string, expectedStatus utils.IntRanges[uint16], filter string, interval uint) {
@@ -292,7 +306,7 @@ func proxiesOnUpdate(pd *proxySetProvider) func([]C.Proxy) {
 	}
 }
 
-func proxiesParseAndFilter(filter string, excludeFilter string, excludeTypeArray []string, filterRegs []*regexp2.Regexp, excludeFilterReg *regexp2.Regexp, dialerProxy string) resource.Parser[[]C.Proxy] {
+func proxiesParseAndFilter(filter string, excludeFilter string, excludeTypeArray []string, filterRegs []*regexp2.Regexp, excludeFilterReg *regexp2.Regexp, dialerProxy string, override OverrideSchema) resource.Parser[[]C.Proxy] {
 	return func(buf []byte) ([]C.Proxy, error) {
 		schema := &ProxySchema{}
 
@@ -343,25 +357,47 @@ func proxiesParseAndFilter(filter string, excludeFilter string, excludeTypeArray
 					continue
 				}
 				if len(excludeFilter) > 0 {
-					if mat, _ := excludeFilterReg.FindStringMatch(name); mat != nil {
+					if mat, _ := excludeFilterReg.MatchString(name); mat {
 						continue
 					}
 				}
 				if len(filter) > 0 {
-					if mat, _ := filterReg.FindStringMatch(name); mat == nil {
+					if mat, _ := filterReg.MatchString(name); !mat {
 						continue
 					}
 				}
 				if _, ok := proxiesSet[name]; ok {
 					continue
 				}
+
 				if len(dialerProxy) > 0 {
 					mapping["dialer-proxy"] = dialerProxy
 				}
+
+				val := reflect.ValueOf(override)
+				for i := 0; i < val.NumField(); i++ {
+					field := val.Field(i)
+					if field.IsNil() {
+						continue
+					}
+					fieldName := strings.Split(val.Type().Field(i).Tag.Get("provider"), ",")[0]
+					switch fieldName {
+					case "additional-prefix":
+						name := mapping["name"].(string)
+						mapping["name"] = *field.Interface().(*string) + name
+					case "additional-suffix":
+						name := mapping["name"].(string)
+						mapping["name"] = name + *field.Interface().(*string)
+					default:
+						mapping[fieldName] = field.Elem().Interface()
+					}
+				}
+
 				proxy, err := adapter.ParseProxy(mapping)
 				if err != nil {
 					return nil, fmt.Errorf("proxy %d error: %w", idx, err)
 				}
+
 				proxiesSet[name] = struct{}{}
 				proxies = append(proxies, proxy)
 			}

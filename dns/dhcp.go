@@ -1,3 +1,5 @@
+//go:build !(android && cmfa)
+
 package dns
 
 import (
@@ -8,8 +10,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/Dreamacro/clash/component/dhcp"
-	"github.com/Dreamacro/clash/component/iface"
+	"github.com/metacubex/mihomo/component/dhcp"
+	"github.com/metacubex/mihomo/component/iface"
 	D "github.com/miekg/dns"
 )
 

@@ -4,9 +4,9 @@ import (
 	"fmt"
 	"runtime"
 
-	"github.com/Dreamacro/clash/common/utils"
-	C "github.com/Dreamacro/clash/constant"
-	"github.com/Dreamacro/clash/log"
+	"github.com/metacubex/mihomo/common/utils"
+	C "github.com/metacubex/mihomo/constant"
+	"github.com/metacubex/mihomo/log"
 )
 
 type Uid struct {
@@ -21,7 +21,7 @@ func NewUid(oUid, adapter string) (*Uid, error) {
 		return nil, fmt.Errorf("uid rule not support this platform")
 	}
 
-	uidRange, err := utils.NewIntRanges[uint32](oUid)
+	uidRange, err := utils.NewUnsignedRanges[uint32](oUid)
 	if err != nil {
 		return nil, fmt.Errorf("%w, %w", errPayload, err)
 	}

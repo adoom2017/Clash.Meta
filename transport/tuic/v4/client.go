@@ -11,19 +11,17 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
-	"unsafe"
 
-	atomic2 "github.com/Dreamacro/clash/common/atomic"
-	"github.com/Dreamacro/clash/common/buf"
-	N "github.com/Dreamacro/clash/common/net"
-	"github.com/Dreamacro/clash/common/pool"
-	C "github.com/Dreamacro/clash/constant"
-	"github.com/Dreamacro/clash/log"
-	"github.com/Dreamacro/clash/transport/tuic/common"
+	atomic2 "github.com/metacubex/mihomo/common/atomic"
+	N "github.com/metacubex/mihomo/common/net"
+	"github.com/metacubex/mihomo/common/pool"
+	C "github.com/metacubex/mihomo/constant"
+	"github.com/metacubex/mihomo/log"
+	"github.com/metacubex/mihomo/transport/tuic/common"
 
 	"github.com/metacubex/quic-go"
-	"github.com/puzpuzpuz/xsync/v2"
-	"github.com/zhangyunhao116/fastrand"
+	"github.com/metacubex/randv2"
+	"github.com/puzpuzpuz/xsync/v3"
 )
 
 type ClientOption struct {
@@ -197,7 +195,7 @@ func (t *clientImpl) handleMessage(quicConn quic.Connection) (err error) {
 	}()
 	for {
 		var message []byte
-		message, err = quicConn.ReceiveMessage(context.Background())
+		message, err = quicConn.ReceiveDatagram(context.Background())
 		if err != nil {
 			return err
 		}
@@ -329,75 +327,30 @@ func (t *clientImpl) DialContextWithDialer(ctx context.Context, metadata *C.Meta
 	}
 
 	bufConn := N.NewBufferedConn(stream)
-	conn := &earlyConn{ExtendedConn: bufConn, bufConn: bufConn, RequestTimeout: t.RequestTimeout}
-	if !t.FastOpen {
-		err = conn.Response()
-		if err != nil {
-			return nil, err
+	response := func() error {
+		if t.RequestTimeout > 0 {
+			_ = bufConn.SetReadDeadline(time.Now().Add(t.RequestTimeout))
 		}
+		response, err := ReadResponse(bufConn)
+		if err != nil {
+			_ = bufConn.Close()
+			return err
+		}
+		if response.IsFailed() {
+			_ = bufConn.Close()
+			return errors.New("connect failed")
+		}
+		_ = bufConn.SetReadDeadline(time.Time{})
+		return nil
 	}
-	return conn, nil
-}
-
-type earlyConn struct {
-	N.ExtendedConn // only expose standard N.ExtendedConn function to outside
-	bufConn        *N.BufferedConn
-	resOnce        sync.Once
-	resErr         error
-
-	RequestTimeout time.Duration
-}
-
-func (conn *earlyConn) response() error {
-	if conn.RequestTimeout > 0 {
-		_ = conn.SetReadDeadline(time.Now().Add(conn.RequestTimeout))
+	if t.FastOpen {
+		return N.NewEarlyConn(bufConn, response), nil
 	}
-	response, err := ReadResponse(conn.bufConn)
+	err = response()
 	if err != nil {
-		_ = conn.Close()
-		return err
+		return nil, err
 	}
-	if response.IsFailed() {
-		_ = conn.Close()
-		return errors.New("connect failed")
-	}
-	_ = conn.SetReadDeadline(time.Time{})
-	return nil
-}
-
-func (conn *earlyConn) Response() error {
-	conn.resOnce.Do(func() {
-		conn.resErr = conn.response()
-	})
-	return conn.resErr
-}
-
-func (conn *earlyConn) Read(b []byte) (n int, err error) {
-	err = conn.Response()
-	if err != nil {
-		return 0, err
-	}
-	return conn.bufConn.Read(b)
-}
-
-func (conn *earlyConn) ReadBuffer(buffer *buf.Buffer) (err error) {
-	err = conn.Response()
-	if err != nil {
-		return err
-	}
-	return conn.bufConn.ReadBuffer(buffer)
-}
-
-func (conn *earlyConn) Upstream() any {
-	return conn.bufConn
-}
-
-func (conn *earlyConn) ReaderReplaceable() bool {
-	return atomic.LoadUint32((*uint32)(unsafe.Pointer(&conn.resOnce))) == 1 && conn.resErr == nil
-}
-
-func (conn *earlyConn) WriterReplaceable() bool {
-	return true
+	return bufConn, nil
 }
 
 func (t *clientImpl) ListenPacketWithDialer(ctx context.Context, metadata *C.Metadata, dialer C.Dialer, dialFn common.DialFunc) (net.PacketConn, error) {
@@ -411,10 +364,10 @@ func (t *clientImpl) ListenPacketWithDialer(ctx context.Context, metadata *C.Met
 		return nil, common.TooManyOpenStreams
 	}
 
-	pipe1, pipe2 := net.Pipe()
+	pipe1, pipe2 := N.Pipe()
 	var connId uint32
 	for {
-		connId = fastrand.Uint32()
+		connId = randv2.Uint32()
 		_, loaded := t.udpInputMap.LoadOrStore(connId, pipe1)
 		if !loaded {
 			break
@@ -469,7 +422,7 @@ func NewClient(clientOption *ClientOption, udp bool, dialerRef C.Dialer) *Client
 		ClientOption: clientOption,
 		udp:          udp,
 		dialerRef:    dialerRef,
-		udpInputMap:  xsync.NewIntegerMapOf[uint32, net.Conn](),
+		udpInputMap:  xsync.NewMapOf[uint32, net.Conn](),
 	}
 	c := &Client{ci}
 	runtime.SetFinalizer(c, closeClient)

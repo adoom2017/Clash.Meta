@@ -4,16 +4,17 @@ import (
 	"bytes"
 	"crypto/aes"
 	"crypto/cipher"
+	"crypto/rand"
 	"encoding/base64"
 	"encoding/binary"
 	"sync"
 	"time"
 
-	"github.com/Dreamacro/clash/common/pool"
-	"github.com/Dreamacro/clash/log"
-	"github.com/Dreamacro/clash/transport/shadowsocks/core"
+	"github.com/metacubex/mihomo/common/pool"
+	"github.com/metacubex/mihomo/log"
+	"github.com/metacubex/mihomo/transport/shadowsocks/core"
 
-	"github.com/zhangyunhao116/fastrand"
+	"github.com/metacubex/randv2"
 )
 
 type Base struct {
@@ -38,8 +39,8 @@ func (a *authData) next() *authData {
 	a.mutex.Lock()
 	defer a.mutex.Unlock()
 	if a.connectionID > 0xff000000 || a.connectionID == 0 {
-		fastrand.Read(a.clientID[:])
-		a.connectionID = fastrand.Uint32() & 0xffffff
+		rand.Read(a.clientID[:])
+		a.connectionID = randv2.Uint32() & 0xffffff
 	}
 	a.connectionID++
 	copy(r.clientID[:], a.clientID[:])

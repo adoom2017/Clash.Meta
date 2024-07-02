@@ -5,10 +5,11 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/Dreamacro/clash/common/structure"
-	"github.com/Dreamacro/clash/component/resource"
-	C "github.com/Dreamacro/clash/constant"
-	P "github.com/Dreamacro/clash/constant/provider"
+	"github.com/metacubex/mihomo/common/structure"
+	"github.com/metacubex/mihomo/component/resource"
+	C "github.com/metacubex/mihomo/constant"
+	"github.com/metacubex/mihomo/constant/features"
+	P "github.com/metacubex/mihomo/constant/provider"
 )
 
 var (
@@ -20,6 +21,7 @@ type ruleProviderSchema struct {
 	Behavior string `provider:"behavior"`
 	Path     string `provider:"path,omitempty"`
 	URL      string `provider:"url,omitempty"`
+	Proxy    string `provider:"proxy,omitempty"`
 	Format   string `provider:"format,omitempty"`
 	Interval int    `provider:"interval,omitempty"`
 }
@@ -60,17 +62,14 @@ func ParseRuleProvider(name string, mapping map[string]interface{}, parse func(t
 		path := C.Path.Resolve(schema.Path)
 		vehicle = resource.NewFileVehicle(path)
 	case "http":
+		path := C.Path.GetPathByHash("rules", schema.URL)
 		if schema.Path != "" {
-			path := C.Path.Resolve(schema.Path)
-			if !C.Path.IsSafePath(path) {
+			path = C.Path.Resolve(schema.Path)
+			if !features.CMFA && !C.Path.IsSafePath(path) {
 				return nil, fmt.Errorf("%w: %s", errSubPath, path)
 			}
-			vehicle = resource.NewHTTPVehicle(schema.URL, path)
-		} else {
-			path := C.Path.GetPathByHash("rules", schema.URL)
-			vehicle = resource.NewHTTPVehicle(schema.URL, path)
 		}
-
+		vehicle = resource.NewHTTPVehicle(schema.URL, path, schema.Proxy, nil)
 	default:
 		return nil, fmt.Errorf("unsupported vehicle type: %s", schema.Type)
 	}

@@ -7,10 +7,10 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/Dreamacro/clash/adapter/inbound"
-	N "github.com/Dreamacro/clash/common/net"
-	C "github.com/Dreamacro/clash/constant"
-	"github.com/Dreamacro/clash/transport/socks5"
+	"github.com/metacubex/mihomo/adapter/inbound"
+	N "github.com/metacubex/mihomo/common/net"
+	C "github.com/metacubex/mihomo/constant"
+	"github.com/metacubex/mihomo/transport/socks5"
 )
 
 func isUpgradeRequest(req *http.Request) bool {
@@ -41,7 +41,7 @@ func handleUpgrade(conn net.Conn, request *http.Request, tunnel C.Tunnel, additi
 		return
 	}
 
-	left, right := net.Pipe()
+	left, right := N.Pipe()
 
 	go tunnel.HandleTCPConn(inbound.NewHTTP(dstAddr, conn, right, additions...))
 

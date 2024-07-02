@@ -1,10 +1,10 @@
 package inbound
 
 import (
-	C "github.com/Dreamacro/clash/constant"
-	LC "github.com/Dreamacro/clash/listener/config"
-	"github.com/Dreamacro/clash/listener/sing_vmess"
-	"github.com/Dreamacro/clash/log"
+	C "github.com/metacubex/mihomo/constant"
+	LC "github.com/metacubex/mihomo/listener/config"
+	"github.com/metacubex/mihomo/listener/sing_vmess"
+	"github.com/metacubex/mihomo/log"
 )
 
 type VmessOption struct {
@@ -13,6 +13,7 @@ type VmessOption struct {
 	WsPath      string      `inbound:"ws-path,omitempty"`
 	Certificate string      `inbound:"certificate,omitempty"`
 	PrivateKey  string      `inbound:"private-key,omitempty"`
+	MuxOption   MuxOption   `inbound:"mux-option,omitempty"`
 }
 
 type VmessUser struct {
@@ -55,6 +56,7 @@ func NewVmess(options *VmessOption) (*Vmess, error) {
 			WsPath:      options.WsPath,
 			Certificate: options.Certificate,
 			PrivateKey:  options.PrivateKey,
+			MuxOption:   options.MuxOption.Build(),
 		},
 	}, nil
 }

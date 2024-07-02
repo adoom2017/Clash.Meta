@@ -3,8 +3,8 @@ package common
 import (
 	"fmt"
 
-	"github.com/Dreamacro/clash/common/utils"
-	C "github.com/Dreamacro/clash/constant"
+	"github.com/metacubex/mihomo/common/utils"
+	C "github.com/metacubex/mihomo/constant"
 )
 
 type Port struct {
@@ -39,7 +39,7 @@ func (p *Port) Payload() string {
 }
 
 func NewPort(port string, adapter string, ruleType C.RuleType) (*Port, error) {
-	portRanges, err := utils.NewIntRanges[uint16](port)
+	portRanges, err := utils.NewUnsignedRanges[uint16](port)
 	if err != nil {
 		return nil, fmt.Errorf("%w, %w", errPayload, err)
 	}

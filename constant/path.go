@@ -10,17 +10,18 @@ import (
 	"strings"
 )
 
-const Name = "clash"
+const Name = "mihomo"
 
 var (
 	GeositeName = "GeoSite.dat"
 	GeoipName   = "GeoIP.dat"
+	ASNName     = "ASN.mmdb"
 )
 
 // Path is used to get the configuration path
 //
-// on Unix systems, `$HOME/.config/clash`.
-// on Windows, `%USERPROFILE%/.config/clash`.
+// on Unix systems, `$HOME/.config/mihomo`.
+// on Windows, `%USERPROFILE%/.config/mihomo`.
 var Path = func() *path {
 	homeDir, err := os.UserHomeDir()
 	if err != nil {
@@ -122,6 +123,25 @@ func (p *path) MMDB() string {
 	return P.Join(p.homeDir, "geoip.metadb")
 }
 
+func (p *path) ASN() string {
+	files, err := os.ReadDir(p.homeDir)
+	if err != nil {
+		return ""
+	}
+	for _, fi := range files {
+		if fi.IsDir() {
+			// 目录则直接跳过
+			continue
+		} else {
+			if strings.EqualFold(fi.Name(), "ASN.mmdb") {
+				ASNName = fi.Name()
+				return P.Join(p.homeDir, fi.Name())
+			}
+		}
+	}
+	return P.Join(p.homeDir, ASNName)
+}
+
 func (p *path) OldCache() string {
 	return P.Join(p.homeDir, ".cache")
 }
@@ -175,7 +195,7 @@ func (p *path) GetAssetLocation(file string) string {
 func (p *path) GetExecutableFullPath() string {
 	exePath, err := os.Executable()
 	if err != nil {
-		return "clash"
+		return "mihomo"
 	}
 	res, _ := filepath.EvalSymlinks(exePath)
 	return res

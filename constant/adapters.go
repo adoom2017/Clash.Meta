@@ -9,17 +9,19 @@ import (
 	"sync"
 	"time"
 
-	N "github.com/Dreamacro/clash/common/net"
-	"github.com/Dreamacro/clash/common/utils"
-	"github.com/Dreamacro/clash/component/dialer"
+	N "github.com/metacubex/mihomo/common/net"
+	"github.com/metacubex/mihomo/common/utils"
+	"github.com/metacubex/mihomo/component/dialer"
 )
 
 // Adapter Type
 const (
 	Direct AdapterType = iota
 	Reject
+	RejectDrop
 	Compatible
 	Pass
+	Dns
 
 	Relay
 	Selector
@@ -39,13 +41,15 @@ const (
 	Hysteria2
 	WireGuard
 	Tuic
+	Ssh
 )
 
 const (
-	DefaultTCPTimeout           = 5 * time.Second
-	DefaultUDPTimeout           = DefaultTCPTimeout
-	DefaultTLSTimeout           = DefaultTCPTimeout
-	DefaultMaxHealthCheckUrlNum = 16
+	DefaultTCPTimeout = dialer.DefaultTCPTimeout
+	DefaultUDPTimeout = dialer.DefaultUDPTimeout
+	DefaultDropTime   = 12 * DefaultTCPTimeout
+	DefaultTLSTimeout = DefaultTCPTimeout
+	DefaultTestURL    = "https://www.gstatic.com/generate_204"
 )
 
 var ErrNotSupport = errors.New("no support")
@@ -145,23 +149,20 @@ type DelayHistory struct {
 	Delay uint16    `json:"delay"`
 }
 
-type DelayHistoryStoreType int
+type ProxyState struct {
+	Alive   bool           `json:"alive"`
+	History []DelayHistory `json:"history"`
+}
 
-const (
-	OriginalHistory DelayHistoryStoreType = iota
-	ExtraHistory
-	DropHistory
-)
+type DelayHistoryStoreType int
 
 type Proxy interface {
 	ProxyAdapter
-	Alive() bool
 	AliveForTestUrl(url string) bool
 	DelayHistory() []DelayHistory
-	ExtraDelayHistory() map[string][]DelayHistory
-	LastDelay() uint16
+	ExtraDelayHistories() map[string]ProxyState
 	LastDelayForTestUrl(url string) uint16
-	URLTest(ctx context.Context, url string, expectedStatus utils.IntRanges[uint16], store DelayHistoryStoreType) (uint16, error)
+	URLTest(ctx context.Context, url string, expectedStatus utils.IntRanges[uint16]) (uint16, error)
 
 	// Deprecated: use DialContext instead.
 	Dial(metadata *Metadata) (Conn, error)
@@ -179,10 +180,14 @@ func (at AdapterType) String() string {
 		return "Direct"
 	case Reject:
 		return "Reject"
+	case RejectDrop:
+		return "RejectDrop"
 	case Compatible:
 		return "Compatible"
 	case Pass:
 		return "Pass"
+	case Dns:
+		return "Dns"
 	case Shadowsocks:
 		return "Shadowsocks"
 	case ShadowsocksR:
@@ -218,7 +223,8 @@ func (at AdapterType) String() string {
 		return "URLTest"
 	case LoadBalance:
 		return "LoadBalance"
-
+	case Ssh:
+		return "Ssh"
 	default:
 		return "Unknown"
 	}

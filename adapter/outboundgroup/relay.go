@@ -3,15 +3,19 @@ package outboundgroup
 import (
 	"context"
 	"encoding/json"
-	"github.com/Dreamacro/clash/adapter/outbound"
-	"github.com/Dreamacro/clash/component/dialer"
-	"github.com/Dreamacro/clash/component/proxydialer"
-	C "github.com/Dreamacro/clash/constant"
-	"github.com/Dreamacro/clash/constant/provider"
+
+	"github.com/metacubex/mihomo/adapter/outbound"
+	"github.com/metacubex/mihomo/component/dialer"
+	"github.com/metacubex/mihomo/component/proxydialer"
+	C "github.com/metacubex/mihomo/constant"
+	"github.com/metacubex/mihomo/constant/provider"
+	"github.com/metacubex/mihomo/log"
 )
 
 type Relay struct {
 	*GroupBase
+	Hidden bool
+	Icon   string
 }
 
 // DialContext implements C.ProxyAdapter
@@ -106,8 +110,10 @@ func (r *Relay) MarshalJSON() ([]byte, error) {
 		all = append(all, proxy.Name())
 	}
 	return json.Marshal(map[string]any{
-		"type": r.Type().String(),
-		"all":  all,
+		"type":   r.Type().String(),
+		"all":    all,
+		"hidden": r.Hidden,
+		"icon":   r.Icon,
 	})
 }
 
@@ -144,6 +150,7 @@ func (r *Relay) Addr() string {
 }
 
 func NewRelay(option *GroupCommonOption, providers []provider.ProxyProvider) *Relay {
+	log.Warnln("The group [%s] with relay type is deprecated, please using dialer-proxy instead", option.Name)
 	return &Relay{
 		GroupBase: NewGroupBase(GroupBaseOption{
 			outbound.BaseOption{
@@ -155,7 +162,11 @@ func NewRelay(option *GroupCommonOption, providers []provider.ProxyProvider) *Re
 			"",
 			"",
 			"",
+			5000,
+			5,
 			providers,
 		}),
+		Hidden: option.Hidden,
+		Icon:   option.Icon,
 	}
 }

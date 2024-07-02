@@ -3,9 +3,10 @@ package http
 import (
 	"net"
 
-	"github.com/Dreamacro/clash/adapter/inbound"
-	"github.com/Dreamacro/clash/common/cache"
-	C "github.com/Dreamacro/clash/constant"
+	"github.com/metacubex/mihomo/adapter/inbound"
+	"github.com/metacubex/mihomo/common/lru"
+	C "github.com/metacubex/mihomo/constant"
+	"github.com/metacubex/mihomo/constant/features"
 )
 
 type Listener struct {
@@ -35,7 +36,9 @@ func New(addr string, tunnel C.Tunnel, additions ...inbound.Addition) (*Listener
 }
 
 func NewWithAuthenticate(addr string, tunnel C.Tunnel, authenticate bool, additions ...inbound.Addition) (*Listener, error) {
+	isDefault := false
 	if len(additions) == 0 {
+		isDefault = true
 		additions = []inbound.Addition{
 			inbound.WithInName("DEFAULT-HTTP"),
 			inbound.WithSpecialRules(""),
@@ -47,9 +50,9 @@ func NewWithAuthenticate(addr string, tunnel C.Tunnel, authenticate bool, additi
 		return nil, err
 	}
 
-	var c *cache.LruCache[string, bool]
+	var c *lru.LruCache[string, bool]
 	if authenticate {
-		c = cache.New[string, bool](cache.WithAge[string, bool](30))
+		c = lru.New[string, bool](lru.WithAge[string, bool](30))
 	}
 
 	hl := &Listener{
@@ -64,6 +67,17 @@ func NewWithAuthenticate(addr string, tunnel C.Tunnel, authenticate bool, additi
 					break
 				}
 				continue
+			}
+			if features.CMFA {
+				if t, ok := conn.(*net.TCPConn); ok {
+					t.SetKeepAlive(false)
+				}
+			}
+			if isDefault { // only apply on default listener
+				if !inbound.IsRemoteAddrDisAllowed(conn.RemoteAddr()) {
+					_ = conn.Close()
+					continue
+				}
 			}
 			go HandleConn(conn, tunnel, c, additions...)
 		}

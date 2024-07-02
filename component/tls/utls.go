@@ -4,10 +4,10 @@ import (
 	"crypto/tls"
 	"net"
 
-	"github.com/Dreamacro/clash/log"
+	"github.com/metacubex/mihomo/log"
 
+	utls "github.com/metacubex/utls"
 	"github.com/mroth/weightedrand/v2"
-	utls "github.com/sagernet/utls"
 )
 
 type UConn struct {
@@ -68,16 +68,21 @@ func RollFingerprint() (UClientHelloID, bool) {
 }
 
 var Fingerprints = map[string]UClientHelloID{
-	"chrome":     {&utls.HelloChrome_Auto},
-	"firefox":    {&utls.HelloFirefox_Auto},
-	"safari":     {&utls.HelloSafari_Auto},
-	"ios":        {&utls.HelloIOS_Auto},
-	"android":    {&utls.HelloAndroid_11_OkHttp},
-	"edge":       {&utls.HelloEdge_Auto},
-	"360":        {&utls.Hello360_Auto},
-	"qq":         {&utls.HelloQQ_Auto},
-	"random":     {nil},
-	"randomized": {nil},
+	"chrome":                     {&utls.HelloChrome_Auto},
+	"chrome_psk":                 {&utls.HelloChrome_100_PSK},
+	"chrome_psk_shuffle":         {&utls.HelloChrome_106_Shuffle},
+	"chrome_padding_psk_shuffle": {&utls.HelloChrome_114_Padding_PSK_Shuf},
+	"chrome_pq":                  {&utls.HelloChrome_115_PQ},
+	"chrome_pq_psk":              {&utls.HelloChrome_115_PQ_PSK},
+	"firefox":                    {&utls.HelloFirefox_Auto},
+	"safari":                     {&utls.HelloSafari_Auto},
+	"ios":                        {&utls.HelloIOS_Auto},
+	"android":                    {&utls.HelloAndroid_11_OkHttp},
+	"edge":                       {&utls.HelloEdge_Auto},
+	"360":                        {&utls.Hello360_Auto},
+	"qq":                         {&utls.HelloQQ_Auto},
+	"random":                     {nil},
+	"randomized":                 {nil},
 }
 
 func init() {

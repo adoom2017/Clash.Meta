@@ -6,15 +6,15 @@ import (
 	"net"
 	"strings"
 
-	"github.com/Dreamacro/clash/adapter/inbound"
-	N "github.com/Dreamacro/clash/common/net"
-	"github.com/Dreamacro/clash/common/sockopt"
-	C "github.com/Dreamacro/clash/constant"
-	LC "github.com/Dreamacro/clash/listener/config"
-	embedSS "github.com/Dreamacro/clash/listener/shadowsocks"
-	"github.com/Dreamacro/clash/listener/sing"
-	"github.com/Dreamacro/clash/log"
-	"github.com/Dreamacro/clash/ntp"
+	"github.com/metacubex/mihomo/adapter/inbound"
+	N "github.com/metacubex/mihomo/common/net"
+	"github.com/metacubex/mihomo/common/sockopt"
+	C "github.com/metacubex/mihomo/constant"
+	LC "github.com/metacubex/mihomo/listener/config"
+	embedSS "github.com/metacubex/mihomo/listener/shadowsocks"
+	"github.com/metacubex/mihomo/listener/sing"
+	"github.com/metacubex/mihomo/log"
+	"github.com/metacubex/mihomo/ntp"
 
 	shadowsocks "github.com/metacubex/sing-shadowsocks"
 	"github.com/metacubex/sing-shadowsocks/shadowaead"
@@ -23,6 +23,7 @@ import (
 	"github.com/sagernet/sing/common/buf"
 	"github.com/sagernet/sing/common/bufio"
 	M "github.com/sagernet/sing/common/metadata"
+	"github.com/sagernet/sing/common/network"
 )
 
 type Listener struct {
@@ -50,10 +51,14 @@ func New(config LC.ShadowsocksServer, tunnel C.Tunnel, additions ...inbound.Addi
 
 	udpTimeout := int64(sing.UDPTimeout.Seconds())
 
-	h := &sing.ListenerHandler{
+	h, err := sing.NewListenerHandler(sing.ListenerConfig{
 		Tunnel:    tunnel,
 		Type:      C.SHADOWSOCKS,
 		Additions: additions,
+		MuxOption: config.MuxOption,
+	})
+	if err != nil {
+		return nil, err
 	}
 
 	sl = &Listener{false, config, nil, nil, nil}
@@ -92,30 +97,33 @@ func New(config LC.ShadowsocksServer, tunnel C.Tunnel, additions ...inbound.Addi
 
 			go func() {
 				conn := bufio.NewPacketConn(ul)
-				var buff *buf.Buffer
-				newBuffer := func() *buf.Buffer {
-					buff = buf.NewPacket() // do not use stack buffer
-					return buff
+				rwOptions := network.ReadWaitOptions{
+					FrontHeadroom: network.CalculateFrontHeadroom(sl.service),
+					RearHeadroom:  network.CalculateRearHeadroom(sl.service),
+					MTU:           network.CalculateMTU(conn, sl.service),
 				}
 				readWaiter, isReadWaiter := bufio.CreatePacketReadWaiter(conn)
 				if isReadWaiter {
-					readWaiter.InitializeReadWaiter(newBuffer)
+					readWaiter.InitializeReadWaiter(rwOptions)
 				}
 				for {
 					var (
+						buff *buf.Buffer
 						dest M.Socksaddr
 						err  error
 					)
 					buff = nil // clear last loop status, avoid repeat release
 					if isReadWaiter {
-						dest, err = readWaiter.WaitReadPacket()
+						buff, dest, err = readWaiter.WaitReadPacket()
 					} else {
-						dest, err = conn.ReadPacket(newBuffer())
+						buff = rwOptions.NewPacketBuffer()
+						dest, err = conn.ReadPacket(buff)
+						if buff != nil {
+							rwOptions.PostReturn(buff)
+						}
 					}
 					if err != nil {
-						if buff != nil {
-							buff.Release()
-						}
+						buff.Release()
 						if sl.closed {
 							break
 						}

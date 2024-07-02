@@ -5,10 +5,10 @@ import (
 	"sync"
 	"time"
 
-	"github.com/Dreamacro/clash/common/atomic"
-	N "github.com/Dreamacro/clash/common/net"
-	"github.com/Dreamacro/clash/common/pool"
-	"github.com/Dreamacro/clash/transport/tuic/common"
+	"github.com/metacubex/mihomo/common/atomic"
+	N "github.com/metacubex/mihomo/common/net"
+	"github.com/metacubex/mihomo/common/pool"
+	"github.com/metacubex/mihomo/transport/tuic/common"
 
 	"github.com/metacubex/quic-go"
 )
@@ -123,7 +123,7 @@ func (q *quicStreamPacketConn) WaitReadFrom() (data []byte, put func(), addr net
 
 func (q *quicStreamPacketConn) WriteTo(p []byte, addr net.Addr) (n int, err error) {
 	if q.udpRelayMode != common.QUIC && len(p) > q.maxUdpRelayPacketSize {
-		return 0, quic.ErrMessageTooLarge(q.maxUdpRelayPacketSize)
+		return 0, &quic.DatagramTooLargeError{MaxDatagramPayloadSize: int64(q.maxUdpRelayPacketSize)}
 	}
 	if q.closed {
 		return 0, net.ErrClosed
@@ -161,7 +161,7 @@ func (q *quicStreamPacketConn) WriteTo(p []byte, addr net.Addr) (n int, err erro
 		}
 	default: // native
 		data := buf.Bytes()
-		err = q.quicConn.SendMessage(data)
+		err = q.quicConn.SendDatagram(data)
 		if err != nil {
 			return
 		}

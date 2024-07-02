@@ -4,15 +4,18 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"sync"
 	"time"
 
-	"github.com/Dreamacro/clash/adapter/outbound"
-	"github.com/Dreamacro/clash/common/callback"
-	N "github.com/Dreamacro/clash/common/net"
-	"github.com/Dreamacro/clash/common/singledo"
-	"github.com/Dreamacro/clash/component/dialer"
-	C "github.com/Dreamacro/clash/constant"
-	"github.com/Dreamacro/clash/constant/provider"
+	"github.com/metacubex/mihomo/adapter/outbound"
+	"github.com/metacubex/mihomo/common/callback"
+	N "github.com/metacubex/mihomo/common/net"
+	"github.com/metacubex/mihomo/common/singledo"
+	"github.com/metacubex/mihomo/common/utils"
+	"github.com/metacubex/mihomo/component/dialer"
+	C "github.com/metacubex/mihomo/constant"
+	"github.com/metacubex/mihomo/constant/provider"
 )
 
 type urlTestOption func(*URLTest)
@@ -30,6 +33,8 @@ type URLTest struct {
 	expectedStatus string
 	tolerance      uint16
 	disableUDP     bool
+	Hidden         bool
+	Icon           string
 	fastNode       C.Proxy
 	fastSingle     *singledo.Single[C.Proxy]
 }
@@ -101,7 +106,7 @@ func (u *URLTest) fast(touch bool) C.Proxy {
 	proxies := u.GetProxies(touch)
 	if u.selected != "" {
 		for _, proxy := range proxies {
-			if !proxy.Alive() {
+			if !proxy.AliveForTestUrl(u.testUrl) {
 				continue
 			}
 			if proxy.Name() == u.selected {
@@ -113,8 +118,7 @@ func (u *URLTest) fast(touch bool) C.Proxy {
 
 	elm, _, shared := u.fastSingle.Do(func() (C.Proxy, error) {
 		fast := proxies[0]
-		// min := fast.LastDelay()
-		min := fast.LastDelayForTestUrl(u.testUrl)
+		minDelay := fast.LastDelayForTestUrl(u.testUrl)
 		fastNotExist := true
 
 		for _, proxy := range proxies[1:] {
@@ -122,21 +126,18 @@ func (u *URLTest) fast(touch bool) C.Proxy {
 				fastNotExist = false
 			}
 
-			// if !proxy.Alive() {
 			if !proxy.AliveForTestUrl(u.testUrl) {
 				continue
 			}
 
-			// delay := proxy.LastDelay()
 			delay := proxy.LastDelayForTestUrl(u.testUrl)
-			if delay < min {
+			if delay < minDelay {
 				fast = proxy
-				min = delay
+				minDelay = delay
 			}
 
 		}
 		// tolerance
-		// if u.fastNode == nil || fastNotExist || !u.fastNode.Alive() || u.fastNode.LastDelay() > fast.LastDelay()+u.tolerance {
 		if u.fastNode == nil || fastNotExist || !u.fastNode.AliveForTestUrl(u.testUrl) || u.fastNode.LastDelayForTestUrl(u.testUrl) > fast.LastDelayForTestUrl(u.testUrl)+u.tolerance {
 			u.fastNode = fast
 		}
@@ -169,12 +170,43 @@ func (u *URLTest) MarshalJSON() ([]byte, error) {
 		all = append(all, proxy.Name())
 	}
 	return json.Marshal(map[string]any{
-		"type":     u.Type().String(),
-		"now":      u.Now(),
-		"all":      all,
-		"testUrl":  u.testUrl,
-		"expected": u.expectedStatus,
+		"type":           u.Type().String(),
+		"now":            u.Now(),
+		"all":            all,
+		"testUrl":        u.testUrl,
+		"expectedStatus": u.expectedStatus,
+		"fixed":          u.selected,
+		"hidden":         u.Hidden,
+		"icon":           u.Icon,
 	})
+}
+
+func (u *URLTest) URLTest(ctx context.Context, url string, expectedStatus utils.IntRanges[uint16]) (map[string]uint16, error) {
+	var wg sync.WaitGroup
+	var lock sync.Mutex
+	mp := map[string]uint16{}
+	proxies := u.GetProxies(false)
+	for _, proxy := range proxies {
+		proxy := proxy
+		wg.Add(1)
+		go func() {
+			delay, err := proxy.URLTest(ctx, u.testUrl, expectedStatus)
+			if err == nil {
+				lock.Lock()
+				mp[proxy.Name()] = delay
+				lock.Unlock()
+			}
+
+			wg.Done()
+		}()
+	}
+	wg.Wait()
+
+	if len(mp) == 0 {
+		return mp, fmt.Errorf("get delay: all proxies timeout")
+	} else {
+		return mp, nil
+	}
 }
 
 func parseURLTestOption(config map[string]any) []urlTestOption {
@@ -203,12 +235,16 @@ func NewURLTest(option *GroupCommonOption, providers []provider.ProxyProvider, o
 			option.Filter,
 			option.ExcludeFilter,
 			option.ExcludeType,
+			option.TestTimeout,
+			option.MaxFailedTimes,
 			providers,
 		}),
 		fastSingle:     singledo.NewSingle[C.Proxy](time.Second * 10),
 		disableUDP:     option.DisableUDP,
 		testUrl:        option.URL,
 		expectedStatus: option.ExpectedStatus,
+		Hidden:         option.Hidden,
+		Icon:           option.Icon,
 	}
 
 	for _, option := range options {

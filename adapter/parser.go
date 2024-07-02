@@ -3,11 +3,11 @@ package adapter
 import (
 	"fmt"
 
-	tlsC "github.com/Dreamacro/clash/component/tls"
+	tlsC "github.com/metacubex/mihomo/component/tls"
 
-	"github.com/Dreamacro/clash/adapter/outbound"
-	"github.com/Dreamacro/clash/common/structure"
-	C "github.com/Dreamacro/clash/constant"
+	"github.com/metacubex/mihomo/adapter/outbound"
+	"github.com/metacubex/mihomo/common/structure"
+	C "github.com/metacubex/mihomo/constant"
 )
 
 func ParseProxy(mapping map[string]any) (C.Proxy, error) {
@@ -120,6 +120,13 @@ func ParseProxy(mapping map[string]any) (C.Proxy, error) {
 			break
 		}
 		proxy = outbound.NewDirectWithOption(*directOption)
+	case "dns":
+		dnsOptions := &outbound.DnsOption{}
+		err = decoder.Decode(mapping, dnsOptions)
+		if err != nil {
+			break
+		}
+		proxy = outbound.NewDnsWithOption(*dnsOptions)
 	case "reject":
 		rejectOption := &outbound.RejectOption{}
 		err = decoder.Decode(mapping, rejectOption)
@@ -127,6 +134,13 @@ func ParseProxy(mapping map[string]any) (C.Proxy, error) {
 			break
 		}
 		proxy = outbound.NewRejectWithOption(*rejectOption)
+	case "ssh":
+		sshOption := &outbound.SshOption{}
+		err = decoder.Decode(mapping, sshOption)
+		if err != nil {
+			break
+		}
+		proxy, err = outbound.NewSsh(*sshOption)
 	default:
 		return nil, fmt.Errorf("unsupport proxy type: %s", proxyType)
 	}

@@ -5,9 +5,10 @@ import (
 	"regexp"
 	"strings"
 
-	"github.com/Dreamacro/clash/common/collections"
-	C "github.com/Dreamacro/clash/constant"
-	"github.com/Dreamacro/clash/rules/common"
+	C "github.com/metacubex/mihomo/constant"
+	"github.com/metacubex/mihomo/rules/common"
+
+	list "github.com/bahlo/generic-list-go"
 )
 
 type Logic struct {
@@ -133,7 +134,7 @@ func (logic *Logic) payloadToRule(subPayload string, parseRule ParseRuleFunc) (C
 }
 
 func (logic *Logic) format(payload string) ([]Range, error) {
-	stack := collections.NewStack()
+	stack := list.New[Range]()
 	num := 0
 	subRanges := make([]Range, 0)
 	for i, c := range payload {
@@ -144,15 +145,16 @@ func (logic *Logic) format(payload string) ([]Range, error) {
 			}
 
 			num++
-			stack.Push(sr)
+			stack.PushBack(sr)
 		} else if c == ')' {
 			if stack.Len() == 0 {
 				return nil, fmt.Errorf("missing '('")
 			}
 
-			sr := stack.Pop().(Range)
-			sr.end = i
-			subRanges = append(subRanges, sr)
+			sr := stack.Back()
+			stack.Remove(sr)
+			sr.Value.end = i
+			subRanges = append(subRanges, sr.Value)
 		}
 	}
 
@@ -216,6 +218,13 @@ func (logic *Logic) parsePayload(payload string, parseRule ParseRuleFunc) error 
 				return err
 			}
 
+			if rule.ShouldResolveIP() {
+				logic.needIP = true
+			}
+			if rule.ShouldFindProcess() {
+				logic.needProcess = true
+			}
+
 			rules = append(rules, rule)
 		}
 
@@ -235,7 +244,7 @@ func matchSubRules(metadata *C.Metadata, name string, subRules map[string][]C.Ru
 	for _, rule := range subRules[name] {
 		if m, a := rule.Match(metadata); m {
 			if rule.RuleType() == C.SubRules {
-				matchSubRules(metadata, rule.Adapter(), subRules)
+				return matchSubRules(metadata, rule.Adapter(), subRules)
 			} else {
 				return m, a
 			}
@@ -289,4 +298,11 @@ func (logic *Logic) ShouldResolveIP() bool {
 
 func (logic *Logic) ShouldFindProcess() bool {
 	return logic.needProcess
+}
+
+func (logic *Logic) ProviderNames() (names []string) {
+	for _, rule := range logic.rules {
+		names = append(names, rule.ProviderNames()...)
+	}
+	return
 }

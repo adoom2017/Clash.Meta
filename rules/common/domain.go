@@ -3,7 +3,8 @@ package common
 import (
 	"strings"
 
-	C "github.com/Dreamacro/clash/constant"
+	C "github.com/metacubex/mihomo/constant"
+	"golang.org/x/net/idna"
 )
 
 type Domain struct {
@@ -29,9 +30,10 @@ func (d *Domain) Payload() string {
 }
 
 func NewDomain(domain string, adapter string) *Domain {
+	punycode, _ := idna.ToASCII(strings.ToLower(domain))
 	return &Domain{
 		Base:    &Base{},
-		domain:  strings.ToLower(domain),
+		domain:  punycode,
 		adapter: adapter,
 	}
 }

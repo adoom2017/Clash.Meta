@@ -8,12 +8,12 @@ import (
 	"sync"
 	"time"
 
-	"github.com/Dreamacro/clash/common/cache"
-	N "github.com/Dreamacro/clash/common/net"
-	"github.com/Dreamacro/clash/component/trie"
-	C "github.com/Dreamacro/clash/constant"
-	"github.com/Dreamacro/clash/constant/sniffer"
-	"github.com/Dreamacro/clash/log"
+	"github.com/metacubex/mihomo/common/lru"
+	N "github.com/metacubex/mihomo/common/net"
+	"github.com/metacubex/mihomo/component/trie"
+	C "github.com/metacubex/mihomo/constant"
+	"github.com/metacubex/mihomo/constant/sniffer"
+	"github.com/metacubex/mihomo/log"
 )
 
 var (
@@ -29,7 +29,7 @@ type SnifferDispatcher struct {
 	sniffers        map[sniffer.Sniffer]SnifferConfig
 	forceDomain     *trie.DomainSet
 	skipSNI         *trie.DomainSet
-	skipList        *cache.LruCache[string, uint8]
+	skipList        *lru.LruCache[string, uint8]
 	rwMux           sync.RWMutex
 	forceDnsMapping bool
 	parsePureIp     bool
@@ -116,14 +116,13 @@ func (sd *SnifferDispatcher) TCPSniff(conn *N.BufferedConn, metadata *C.Metadata
 }
 
 func (sd *SnifferDispatcher) replaceDomain(metadata *C.Metadata, host string, overrideDest bool) {
-	// show log early, since the following code may mutate `metadata.Host`
-	log.Debugln("[Sniffer] Sniff %s [%s]-->[%s] success, replace domain [%s]-->[%s]",
-		metadata.NetWork,
-		metadata.SourceDetail(),
-		metadata.RemoteAddress(),
-		metadata.Host, host)
 	metadata.SniffHost = host
 	if overrideDest {
+		log.Debugln("[Sniffer] Sniff %s [%s]-->[%s] success, replace domain [%s]-->[%s]",
+			metadata.NetWork,
+			metadata.SourceDetail(),
+			metadata.RemoteAddress(),
+			metadata.Host, host)
 		metadata.Host = host
 	}
 	metadata.DNSMode = C.DNSNormal
@@ -202,7 +201,7 @@ func NewSnifferDispatcher(snifferConfig map[sniffer.Type]SnifferConfig,
 		enable:          true,
 		forceDomain:     forceDomain,
 		skipSNI:         skipSNI,
-		skipList:        cache.New(cache.WithSize[string, uint8](128), cache.WithAge[string, uint8](600)),
+		skipList:        lru.New(lru.WithSize[string, uint8](128), lru.WithAge[string, uint8](600)),
 		forceDnsMapping: forceDnsMapping,
 		parsePureIp:     parsePureIp,
 		sniffers:        make(map[sniffer.Sniffer]SnifferConfig, 0),
