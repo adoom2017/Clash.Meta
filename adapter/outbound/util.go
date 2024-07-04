@@ -3,30 +3,16 @@ package outbound
 import (
 	"bytes"
 	"context"
-	"crypto/tls"
 	"fmt"
 	"net"
 	"net/netip"
 	"regexp"
 	"strconv"
-	"sync"
 
 	"github.com/metacubex/mihomo/component/resolver"
 	C "github.com/metacubex/mihomo/constant"
 	"github.com/metacubex/mihomo/transport/socks5"
 )
-
-var (
-	globalClientSessionCache tls.ClientSessionCache
-	once                     sync.Once
-)
-
-func getClientSessionCache() tls.ClientSessionCache {
-	once.Do(func() {
-		globalClientSessionCache = tls.NewLRUClientSessionCache(128)
-	})
-	return globalClientSessionCache
-}
 
 func serializesSocksAddr(metadata *C.Metadata) []byte {
 	var buf [][]byte

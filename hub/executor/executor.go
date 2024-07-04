@@ -5,6 +5,7 @@ import (
 	"net"
 	"net/netip"
 	"os"
+	"path/filepath"
 	"runtime"
 	"strconv"
 	"sync"
@@ -140,7 +141,18 @@ func ApplyConfig(cfg *config.Config, force bool) {
 	tunnel.OnRunning()
 	hcCompatibleProvider(cfg.Providers)
 
-	log.SetLevel(cfg.General.LogLevel)
+	log.SetLevel(cfg.General.Log.LogLevel)
+	if cfg.General.Log.LogPath != "" {
+		if !filepath.IsAbs(cfg.General.Log.LogPath) {
+			cfg.General.Log.LogPath = filepath.Join(C.Path.HomeDir(), cfg.General.Log.LogPath)
+		}
+
+		log.SetOutput(cfg.General.Log.LogPath,
+			cfg.General.Log.MaxSize,
+			cfg.General.Log.MaxAge,
+			cfg.General.Log.MaxBackups,
+			cfg.General.Log.Compress)
+	}
 }
 
 func initInnerTcp() {
@@ -172,9 +184,17 @@ func GetGeneral() *config.General {
 			AllowLan:          listener.AllowLan(),
 			BindAddress:       listener.BindAddress(),
 		},
-		Controller:        config.Controller{},
-		Mode:              tunnel.Mode(),
-		LogLevel:          log.Level(),
+		Controller: config.Controller{},
+		Mode:       tunnel.Mode(),
+		LogLevel:   log.Level(),
+		Log: config.LogConfig{
+			LogLevel:   log.Level(),
+			LogPath:    log.Path(),
+			MaxSize:    log.Size(),
+			MaxAge:     log.Age(),
+			MaxBackups: log.Backups(),
+			Compress:   log.Compress(),
+		},
 		IPv6:              !resolver.DisableIPv6,
 		GeodataMode:       G.GeodataMode(),
 		GeoAutoUpdate:     G.GeoAutoUpdate(),

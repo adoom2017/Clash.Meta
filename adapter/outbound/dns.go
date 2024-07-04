@@ -33,7 +33,7 @@ func (d *Dns) DialContext(ctx context.Context, metadata *C.Metadata, opts ...dia
 func (d *Dns) ListenPacketContext(ctx context.Context, metadata *C.Metadata, opts ...dialer.Option) (C.PacketConn, error) {
 	log.Debugln("[DNS] hijack udp:%s from %s", metadata.RemoteAddress(), metadata.SourceAddrPort())
 
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(ctx)
 
 	return newPacketConn(&dnsPacketConn{
 		response: make(chan dnsPacket, 1),

@@ -89,7 +89,6 @@ func main() {
 		switch action {
 		case "encrypt":
 			if password == "" {
-				// log.Fatalln("Password is empty.")s
 				pass, err := utils.SetPassword()
 				if err != nil {
 					log.Fatalln("No password found.")
@@ -105,7 +104,6 @@ func main() {
 
 		case "decrypt":
 			if password == "" {
-				// log.Fatalln("Password is empty.")s
 				fmt.Printf("Password: ")
 				pass, err := gopass.GetPasswd()
 				if err != nil {

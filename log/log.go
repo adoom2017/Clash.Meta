@@ -3,16 +3,23 @@ package log
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 
 	"github.com/metacubex/mihomo/common/observable"
+	"gopkg.in/natefinch/lumberjack.v2"
 
 	log "github.com/sirupsen/logrus"
 )
 
 var (
-	logCh  = make(chan Event)
-	source = observable.NewObservable[Event](logCh)
-	level  = INFO
+	logCh      = make(chan Event)
+	source     = observable.NewObservable[Event](logCh)
+	level      = INFO
+	filename   = ""
+	maxSize    = 10
+	maxAge     = 3
+	maxBackups = 10
+	compress   = true
 )
 
 func init() {
@@ -75,8 +82,54 @@ func Level() LogLevel {
 	return level
 }
 
+func Path() string {
+	return filename
+}
+
+func Size() int {
+	return maxSize
+}
+
+func Age() int {
+	return maxAge
+}
+
+func Backups() int {
+	return maxBackups
+}
+
+func Compress() bool {
+	return compress
+}
+
 func SetLevel(newLevel LogLevel) {
 	level = newLevel
+}
+
+func SetOutput(path string, size int, age int, backups int, comp bool) {
+	dir := filepath.Dir(path)
+
+	_, err := os.Stat(dir)
+	if os.IsNotExist(err) {
+		if err := os.MkdirAll(dir, os.ModePerm); err != nil {
+			log.Errorf("Failed to create dir: %s, err: %v", dir, err)
+			return
+		}
+	}
+
+	filename = path
+	maxSize = size
+	maxAge = age
+	maxBackups = backups
+	compress = comp
+
+	log.SetOutput(&lumberjack.Logger{
+		Filename:   filename,
+		MaxSize:    maxSize,
+		MaxAge:     maxAge,
+		MaxBackups: maxBackups,
+		Compress:   compress,
+	})
 }
 
 func print(data Event) {

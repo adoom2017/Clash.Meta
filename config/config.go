@@ -52,6 +52,7 @@ type General struct {
 	Mode                    T.TunnelMode `json:"mode"`
 	UnifiedDelay            bool
 	LogLevel                log.LogLevel      `json:"log-level"`
+	Log                     LogConfig         `json:"log"`
 	IPv6                    bool              `json:"ipv6"`
 	Interface               string            `json:"interface-name"`
 	RoutingMark             int               `json:"-"`
@@ -315,6 +316,7 @@ type RawConfig struct {
 	Mode                    T.TunnelMode      `yaml:"mode" json:"mode"`
 	UnifiedDelay            bool              `yaml:"unified-delay" json:"unified-delay"`
 	LogLevel                log.LogLevel      `yaml:"log-level" json:"log-level"`
+	Log                     LogConfig         `yaml:"log" json:"log"`
 	IPv6                    bool              `yaml:"ipv6" json:"ipv6"`
 	ExternalController      string            `yaml:"external-controller"`
 	ExternalControllerUnix  string            `yaml:"external-controller-unix"`
@@ -390,6 +392,15 @@ type EBpf struct {
 	AutoRedir     []string `yaml:"auto-redir" json:"auto-redir"`
 }
 
+type LogConfig struct {
+	LogLevel   log.LogLevel `yaml:"log-level" json:"log-level"`
+	LogPath    string       `yaml:"log-path" json:"log-path"`
+	MaxSize    int          `yaml:"max-size" json:"max-size"`
+	MaxAge     int          `yaml:"max-age" json:"max-age"`
+	MaxBackups int          `yaml:"max-backups" json:"max-backups"`
+	Compress   bool         `yaml:"compress" json:"compress"`
+}
+
 var (
 	GroupsList             = list.New()
 	ProxiesList            = list.New()
@@ -421,13 +432,21 @@ func UnmarshalRawConfig(buf []byte) (*RawConfig, error) {
 		UnifiedDelay:      false,
 		Authentication:    []string{},
 		LogLevel:          log.INFO,
-		Hosts:             map[string]any{},
-		Rule:              []string{},
-		Proxy:             []map[string]any{},
-		ProxyGroup:        []map[string]any{},
-		TCPConcurrent:     false,
-		FindProcessMode:   P.FindProcessStrict,
-		GlobalUA:          "clash.meta/" + C.Version,
+		Log: LogConfig{
+			LogLevel:   log.INFO,
+			LogPath:    "",
+			MaxSize:    10,
+			MaxAge:     3,
+			MaxBackups: 0,
+			Compress:   true,
+		},
+		Hosts:           map[string]any{},
+		Rule:            []string{},
+		Proxy:           []map[string]any{},
+		ProxyGroup:      []map[string]any{},
+		TCPConcurrent:   false,
+		FindProcessMode: P.FindProcessStrict,
+		GlobalUA:        "clash.meta/" + C.Version,
 		Tun: RawTun{
 			Enable:              false,
 			Device:              "",
@@ -698,9 +717,22 @@ func parseGeneral(cfg *RawConfig) (*General, error) {
 			ExternalControllerUnix: cfg.ExternalControllerUnix,
 			ExternalControllerTLS:  cfg.ExternalControllerTLS,
 		},
-		UnifiedDelay:            cfg.UnifiedDelay,
-		Mode:                    cfg.Mode,
-		LogLevel:                cfg.LogLevel,
+		UnifiedDelay: cfg.UnifiedDelay,
+		Mode:         cfg.Mode,
+		LogLevel:     cfg.LogLevel,
+		Log: LogConfig{
+			LogLevel: func() log.LogLevel {
+				if cfg.LogLevel != log.INFO {
+					return cfg.LogLevel
+				}
+				return cfg.Log.LogLevel
+			}(),
+			LogPath:    cfg.Log.LogPath,
+			MaxSize:    cfg.Log.MaxSize,
+			MaxAge:     cfg.Log.MaxAge,
+			MaxBackups: cfg.Log.MaxBackups,
+			Compress:   cfg.Log.Compress,
+		},
 		IPv6:                    cfg.IPv6,
 		Interface:               cfg.Interface,
 		RoutingMark:             cfg.RoutingMark,
