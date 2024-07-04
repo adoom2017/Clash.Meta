@@ -23,6 +23,7 @@ concurrency:
   
 env:
   REGISTRY: docker.io
+  REPONAME: adoom2018/mihomo
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -427,7 +428,7 @@ jobs:
         id: meta_alpha
         uses: docker/metadata-action@v5
         with:
-          images: '${{ env.REGISTRY }}/${{ github.repository }}'
+          images: '${{ env.REGISTRY }}/${{ env.REPONAME }}'
       
       # Extract metadata (tags, labels) for Docker
       # https://github.com/docker/metadata-action
@@ -436,7 +437,7 @@ jobs:
         id: meta_release
         uses: docker/metadata-action@v5
         with:
-          images: '${{ env.REGISTRY }}/${{ github.repository }}'
+          images: '${{ env.REGISTRY }}/${{ env.REPONAME }}'
           tags: |
             ${{ github.event.inputs.version }}
           flavor: |
