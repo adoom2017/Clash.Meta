@@ -64,7 +64,7 @@ func ParseListener(mapping map[string]any) (C.InboundListener, error) {
 		listener, err = IN.NewTunnel(tunnelOption)
 	case "tun":
 		tunOption := &IN.TunOption{
-			Stack:     C.TunGvisor.String(),
+			Stack:     C.TunGvisor,
 			DNSHijack: []string{"0.0.0.0:53"}, // default hijack all dns query
 		}
 		err = decoder.Decode(mapping, tunOption)
@@ -79,6 +79,13 @@ func ParseListener(mapping map[string]any) (C.InboundListener, error) {
 			return nil, err
 		}
 		listener, err = IN.NewShadowSocks(shadowsocksOption)
+	case "snell":
+		snellOption := &IN.SnellOption{UDP: true}
+		err = decoder.Decode(mapping, snellOption)
+		if err != nil {
+			return nil, err
+		}
+		listener, err = IN.NewSnell(snellOption)
 	case "vmess":
 		vmessOption := &IN.VmessOption{}
 		err = decoder.Decode(mapping, vmessOption)
@@ -86,6 +93,20 @@ func ParseListener(mapping map[string]any) (C.InboundListener, error) {
 			return nil, err
 		}
 		listener, err = IN.NewVmess(vmessOption)
+	case "vless":
+		vlessOption := &IN.VlessOption{}
+		err = decoder.Decode(mapping, vlessOption)
+		if err != nil {
+			return nil, err
+		}
+		listener, err = IN.NewVless(vlessOption)
+	case "trojan":
+		trojanOption := &IN.TrojanOption{}
+		err = decoder.Decode(mapping, trojanOption)
+		if err != nil {
+			return nil, err
+		}
+		listener, err = IN.NewTrojan(trojanOption)
 	case "hysteria2":
 		hysteria2Option := &IN.Hysteria2Option{}
 		err = decoder.Decode(mapping, hysteria2Option)
@@ -93,6 +114,13 @@ func ParseListener(mapping map[string]any) (C.InboundListener, error) {
 			return nil, err
 		}
 		listener, err = IN.NewHysteria2(hysteria2Option)
+	case "hysteria2-realm":
+		hysteria2RealmOption := IN.DefaultHysteria2RealmServerOption()
+		err = decoder.Decode(mapping, hysteria2RealmOption)
+		if err != nil {
+			return nil, err
+		}
+		listener, err = IN.NewHysteria2RealmServer(hysteria2RealmOption)
 	case "tuic":
 		tuicOption := &IN.TuicOption{
 			MaxIdleTime:           15000,
@@ -106,6 +134,47 @@ func ParseListener(mapping map[string]any) (C.InboundListener, error) {
 			return nil, err
 		}
 		listener, err = IN.NewTuic(tuicOption)
+	case "shadowquic":
+		shadowQuicOption := &IN.ShadowQuicOption{
+			MaxIdleTime:          30000,
+			ALPN:                 []string{"h3"},
+			MaxDatagramFrameSize: 1400,
+			CongestionController: "bbr",
+			ZeroRTT:              true,
+		}
+		err = decoder.Decode(mapping, shadowQuicOption)
+		if err != nil {
+			return nil, err
+		}
+		listener, err = IN.NewShadowQuic(shadowQuicOption)
+	case "anytls":
+		anytlsOption := &IN.AnyTLSOption{}
+		err = decoder.Decode(mapping, anytlsOption)
+		if err != nil {
+			return nil, err
+		}
+		listener, err = IN.NewAnyTLS(anytlsOption)
+	case "mieru":
+		mieruOption := &IN.MieruOption{}
+		err = decoder.Decode(mapping, mieruOption)
+		if err != nil {
+			return nil, err
+		}
+		listener, err = IN.NewMieru(mieruOption)
+	case "sudoku":
+		sudokuOption := &IN.SudokuOption{}
+		err = decoder.Decode(mapping, sudokuOption)
+		if err != nil {
+			return nil, err
+		}
+		listener, err = IN.NewSudoku(sudokuOption)
+	case "trusttunnel":
+		trusttunnelOption := &IN.TrustTunnelOption{}
+		err = decoder.Decode(mapping, trusttunnelOption)
+		if err != nil {
+			return nil, err
+		}
+		listener, err = IN.NewTrustTunnel(trusttunnelOption)
 	default:
 		return nil, fmt.Errorf("unsupport proxy type: %s", proxyType)
 	}

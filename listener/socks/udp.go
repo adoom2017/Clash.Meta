@@ -1,12 +1,14 @@
 package socks
 
 import (
+	"context"
 	"net"
 
 	"github.com/metacubex/mihomo/adapter/inbound"
 	N "github.com/metacubex/mihomo/common/net"
 	"github.com/metacubex/mihomo/common/sockopt"
 	C "github.com/metacubex/mihomo/constant"
+	LC "github.com/metacubex/mihomo/listener/config"
 	"github.com/metacubex/mihomo/log"
 	"github.com/metacubex/mihomo/transport/socks5"
 )
@@ -34,24 +36,28 @@ func (l *UDPListener) Close() error {
 }
 
 func NewUDP(addr string, tunnel C.Tunnel, additions ...inbound.Addition) (*UDPListener, error) {
+	return NewUDPWithConfig(defaultConfig(addr), inbound.NewListenConfig(), tunnel, additions...)
+}
+
+func NewUDPWithConfig(config LC.AuthServer, lc C.InboundListenConfig, tunnel C.Tunnel, additions ...inbound.Addition) (*UDPListener, error) {
 	if len(additions) == 0 {
 		additions = []inbound.Addition{
 			inbound.WithInName("DEFAULT-SOCKS"),
 			inbound.WithSpecialRules(""),
 		}
 	}
-	l, err := net.ListenPacket("udp", addr)
+	l, err := lc.ListenPacket(context.Background(), "udp", config.Listen)
 	if err != nil {
 		return nil, err
 	}
 
-	if err := sockopt.UDPReuseaddr(l.(*net.UDPConn)); err != nil {
+	if err := sockopt.UDPReuseaddr(l); err != nil {
 		log.Warnln("Failed to Reuse UDP Address: %s", err)
 	}
 
 	sl := &UDPListener{
 		packetConn: l,
-		addr:       addr,
+		addr:       config.Listen,
 	}
 	conn := N.NewEnhancePacketConn(l)
 	go func() {

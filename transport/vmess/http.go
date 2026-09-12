@@ -3,14 +3,12 @@ package vmess
 import (
 	"bufio"
 	"bytes"
-	"errors"
-	"fmt"
+	"io"
 	"net"
-	"net/http"
 	"net/textproto"
+	"net/url"
 
-	"github.com/metacubex/mihomo/common/utils"
-
+	"github.com/metacubex/http"
 	"github.com/metacubex/randv2"
 )
 
@@ -55,23 +53,27 @@ func (hc *httpConn) Write(b []byte) (int, error) {
 		return hc.Conn.Write(b)
 	}
 
-	if len(hc.cfg.Path) == 0 {
-		return -1, errors.New("path is empty")
+	path := "/"
+	if len(hc.cfg.Path) > 0 {
+		path = hc.cfg.Path[randv2.IntN(len(hc.cfg.Path))]
 	}
 
-	path := hc.cfg.Path[randv2.IntN(len(hc.cfg.Path))]
 	host := hc.cfg.Host
 	if header := hc.cfg.Headers["Host"]; len(header) != 0 {
 		host = header[randv2.IntN(len(header))]
 	}
 
-	u := fmt.Sprintf("http://%s%s", net.JoinHostPort(host, "80"), path)
-	req, err := http.NewRequest(utils.EmptyOr(hc.cfg.Method, http.MethodGet), u, bytes.NewBuffer(b))
-	if err != nil {
-		return 0, err
+	req := http.Request{
+		Method: hc.cfg.Method, // default is GET
+		Host:   host,
+		URL:    &url.URL{Scheme: "http", Host: host, Path: path},
+		Header: make(http.Header),
+		Body:   io.NopCloser(bytes.NewReader(b)),
 	}
 	for key, list := range hc.cfg.Headers {
-		req.Header.Set(key, list[randv2.IntN(len(list))])
+		if len(list) > 0 {
+			req.Header.Set(key, list[randv2.IntN(len(list))])
+		}
 	}
 	req.ContentLength = int64(len(b))
 	if err := req.Write(hc.Conn); err != nil {

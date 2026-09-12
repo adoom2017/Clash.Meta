@@ -4,10 +4,10 @@ import (
 	"context"
 	"io"
 	"net"
+	"net/netip"
 	"time"
 
 	"github.com/metacubex/mihomo/common/buf"
-	"github.com/metacubex/mihomo/component/dialer"
 	C "github.com/metacubex/mihomo/constant"
 )
 
@@ -17,11 +17,12 @@ type Reject struct {
 }
 
 type RejectOption struct {
+	BasicOption
 	Name string `proxy:"name"`
 }
 
 // DialContext implements C.ProxyAdapter
-func (r *Reject) DialContext(ctx context.Context, metadata *C.Metadata, opts ...dialer.Option) (C.Conn, error) {
+func (r *Reject) DialContext(ctx context.Context, metadata *C.Metadata) (C.Conn, error) {
 	if r.drop {
 		return NewConn(dropConn{}, r), nil
 	}
@@ -29,39 +30,49 @@ func (r *Reject) DialContext(ctx context.Context, metadata *C.Metadata, opts ...
 }
 
 // ListenPacketContext implements C.ProxyAdapter
-func (r *Reject) ListenPacketContext(ctx context.Context, metadata *C.Metadata, opts ...dialer.Option) (C.PacketConn, error) {
-	return newPacketConn(&nopPacketConn{}, r), nil
+func (r *Reject) ListenPacketContext(ctx context.Context, metadata *C.Metadata) (C.PacketConn, error) {
+	if err := r.ResolveUDP(ctx, metadata); err != nil {
+		return nil, err
+	}
+	return NewPacketConn(&nopPacketConn{}, r), nil
+}
+
+func (r *Reject) ResolveUDP(ctx context.Context, metadata *C.Metadata) error {
+	if !metadata.Resolved() {
+		metadata.DstIP = netip.IPv4Unspecified()
+	}
+	return nil
 }
 
 func NewRejectWithOption(option RejectOption) *Reject {
 	return &Reject{
-		Base: &Base{
-			name: option.Name,
-			tp:   C.Direct,
-			udp:  true,
-		},
+		Base: NewBase(BaseOption{
+			Name: option.Name,
+			Type: C.Reject,
+			UDP:  true,
+		}),
 	}
 }
 
 func NewReject() *Reject {
 	return &Reject{
-		Base: &Base{
-			name:   "REJECT",
-			tp:     C.Reject,
-			udp:    true,
-			prefer: C.DualStack,
-		},
+		Base: NewBase(BaseOption{
+			Name:   "REJECT",
+			Type:   C.Reject,
+			UDP:    true,
+			Prefer: C.DualStack,
+		}),
 	}
 }
 
 func NewRejectDrop() *Reject {
 	return &Reject{
-		Base: &Base{
-			name:   "REJECT-DROP",
-			tp:     C.RejectDrop,
-			udp:    true,
-			prefer: C.DualStack,
-		},
+		Base: NewBase(BaseOption{
+			Name:   "REJECT-DROP",
+			Type:   C.RejectDrop,
+			UDP:    true,
+			Prefer: C.DualStack,
+		}),
 		drop: true,
 	}
 }
@@ -71,6 +82,17 @@ func NewPass() *Reject {
 		Base: &Base{
 			name:   "PASS",
 			tp:     C.Pass,
+			udp:    true,
+			prefer: C.DualStack,
+		},
+	}
+}
+
+func NewPassRule() *Reject {
+	return &Reject{
+		Base: &Base{
+			name:   "PASS-RULE",
+			tp:     C.PassRule,
 			udp:    true,
 			prefer: C.DualStack,
 		},

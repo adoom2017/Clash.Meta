@@ -7,47 +7,34 @@ import (
 	"net"
 	"net/netip"
 	"os"
-	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
+	"github.com/metacubex/mihomo/common/atomic"
+	"github.com/metacubex/mihomo/component/keepalive"
+	"github.com/metacubex/mihomo/component/mptcp"
 	"github.com/metacubex/mihomo/component/resolver"
-	"github.com/metacubex/mihomo/constant/features"
-	"github.com/metacubex/mihomo/log"
 )
 
 const (
 	DefaultTCPTimeout = 5 * time.Second
 	DefaultUDPTimeout = DefaultTCPTimeout
-)
 
-type dialFunc func(ctx context.Context, network string, ips []netip.Addr, port string, opt *option) (net.Conn, error)
+	dualStackFallbackTimeout = 300 * time.Millisecond
+)
 
 var (
-	dialMux                      sync.Mutex
-	IP4PEnable                   bool
-	actualSingleStackDialContext = serialSingleStackDialContext
-	actualDualStackDialContext   = serialDualStackDialContext
-	tcpConcurrent                = false
-	fallbackTimeout              = 300 * time.Millisecond
+	tcpConcurrent = atomic.NewBool(false)
 )
 
-func applyOptions(options ...Option) *option {
-	opt := &option{
-		interfaceName: DefaultInterface.Load(),
-		routingMark:   int(DefaultRoutingMark.Load()),
-	}
+func SetTcpConcurrent(concurrent bool) {
+	tcpConcurrent.Store(concurrent)
+}
 
-	for _, o := range DefaultOptions {
-		o(opt)
-	}
-
-	for _, o := range options {
-		o(opt)
-	}
-
-	return opt
+func GetTcpConcurrent() bool {
+	return tcpConcurrent.Load()
 }
 
 func DialContext(ctx context.Context, network, address string, options ...Option) (net.Conn, error) {
@@ -68,73 +55,91 @@ func DialContext(ctx context.Context, network, address string, options ...Option
 		return nil, err
 	}
 
+	tcpConcurrent := GetTcpConcurrent()
+
 	switch network {
 	case "tcp4", "tcp6", "udp4", "udp6":
-		return actualSingleStackDialContext(ctx, network, ips, port, opt)
+		if tcpConcurrent {
+			return parallelDialContext(ctx, network, ips, port, opt)
+		}
+		return serialDialContext(ctx, network, ips, port, opt)
 	case "tcp", "udp":
-		return actualDualStackDialContext(ctx, network, ips, port, opt)
+		if tcpConcurrent {
+			if opt.prefer != 4 && opt.prefer != 6 {
+				return parallelDialContext(ctx, network, ips, port, opt)
+			}
+			return dualStackDialContext(ctx, parallelDialContext, network, ips, port, opt)
+		}
+		return dualStackDialContext(ctx, serialDialContext, network, ips, port, opt)
 	default:
 		return nil, ErrorInvalidedNetworkStack
 	}
 }
 
 func ListenPacket(ctx context.Context, network, address string, rAddrPort netip.AddrPort, options ...Option) (net.PacketConn, error) {
-	if features.CMFA && DefaultSocketHook != nil {
-		return listenPacketHooked(ctx, network, address)
-	}
+	opt := applyOptions(options...)
 
-	cfg := applyOptions(options...)
-
-	lc := &net.ListenConfig{}
-	if cfg.interfaceName != "" {
-		bind := bindIfaceToListenConfig
-		if cfg.fallbackBind {
-			bind = fallbackBindIfaceToListenConfig
-		}
-		addr, err := bind(cfg.interfaceName, lc, network, address, rAddrPort)
-		if err != nil {
-			return nil, err
-		}
-		address = addr
+	lc, address, err := listenConfig(network, address, rAddrPort, opt)
+	if err != nil {
+		return nil, err
 	}
-	if cfg.addrReuse {
-		addrReuseToListenConfig(lc)
-	}
-	if cfg.routingMark != 0 {
-		bindMarkToListenConfig(cfg.routingMark, lc, network, address)
-	}
-
 	return lc.ListenPacket(ctx, network, address)
 }
 
-func SetTcpConcurrent(concurrent bool) {
-	dialMux.Lock()
-	defer dialMux.Unlock()
-	tcpConcurrent = concurrent
-	if concurrent {
-		actualSingleStackDialContext = concurrentSingleStackDialContext
-		actualDualStackDialContext = concurrentDualStackDialContext
+// Listen creates a TCP listener with the same socket policy as ListenPacket.
+func Listen(ctx context.Context, network, address string, options ...Option) (net.Listener, error) {
+	lc, address, err := listenConfig(network, address, netip.AddrPort{}, applyOptions(options...))
+	if err != nil {
+		return nil, err
+	}
+	return lc.Listen(ctx, network, address)
+}
+
+func listenConfig(network, address string, rAddrPort netip.AddrPort, opt option) (*net.ListenConfig, string, error) {
+	lc := &net.ListenConfig{}
+	if opt.addrReuse {
+		addrReuseToListenConfig(lc)
+	}
+	if DefaultSocketHook != nil { // ignore interfaceName, routingMark when DefaultSocketHook not null (in CMFA)
+		socketHookToListenConfig(lc)
 	} else {
-		actualSingleStackDialContext = serialSingleStackDialContext
-		actualDualStackDialContext = serialDualStackDialContext
+		if opt.interfaceName == "" {
+			opt.interfaceName = DefaultInterface.Load()
+		}
+		if opt.interfaceName == "" {
+			if finder := DefaultInterfaceFinder.Load(); finder != nil {
+				opt.interfaceName = finder.FindInterfaceName(rAddrPort.Addr().Unmap())
+			}
+		}
+		if rAddrPort.Addr().Unmap().IsLoopback() || listenAddressIsLoopback(address) {
+			// avoid "The requested address is not valid in its context."
+			opt.interfaceName = ""
+		}
+		if opt.interfaceName != "" {
+			bind := bindIfaceToListenConfig
+			if opt.fallbackBind {
+				bind = fallbackBindIfaceToListenConfig
+			}
+			addr, err := bind(opt.interfaceName, lc, network, address, rAddrPort)
+			if err != nil {
+				return nil, "", err
+			}
+			address = addr
+		}
+		if opt.routingMark == 0 {
+			opt.routingMark = int(DefaultRoutingMark.Load())
+		}
+		if opt.routingMark != 0 {
+			bindMarkToListenConfig(opt.routingMark, lc, network, address)
+		}
 	}
+
+	return lc, address, nil
 }
 
-func GetTcpConcurrent() bool {
-	dialMux.Lock()
-	defer dialMux.Unlock()
-	return tcpConcurrent
-}
-
-func dialContext(ctx context.Context, network string, destination netip.Addr, port string, opt *option) (net.Conn, error) {
-	if features.CMFA && DefaultSocketHook != nil {
-		return dialContextHooked(ctx, network, destination, port)
-	}
-
+func dialContext(ctx context.Context, network string, destination netip.Addr, port string, opt option) (net.Conn, error) {
 	var address string
-	if IP4PEnable {
-		destination, port = lookupIP4P(destination, port)
-	}
+	destination, port = resolver.LookupIP4P(destination, port)
 	address = net.JoinHostPort(destination.String(), port)
 
 	netDialer := opt.netDialer
@@ -149,54 +154,87 @@ func dialContext(ctx context.Context, network string, destination netip.Addr, po
 	}
 
 	dialer := netDialer.(*net.Dialer)
-	if opt.interfaceName != "" {
-		bind := bindIfaceToDialer
-		if opt.fallbackBind {
-			bind = fallbackBindIfaceToDialer
+	keepalive.SetNetDialer(dialer)
+	mptcp.SetNetDialer(dialer, opt.mpTcp)
+
+	if DefaultSocketHook != nil { // ignore interfaceName, routingMark and tfo when DefaultSocketHook not null (in CMFA)
+		socketHookToToDialer(dialer)
+	} else {
+		if opt.interfaceName == "" {
+			opt.interfaceName = DefaultInterface.Load()
 		}
-		if err := bind(opt.interfaceName, dialer, network, destination); err != nil {
-			return nil, err
+		if opt.interfaceName == "" {
+			if finder := DefaultInterfaceFinder.Load(); finder != nil {
+				opt.interfaceName = finder.FindInterfaceName(destination)
+			}
+		}
+		if opt.interfaceName != "" {
+			bind := bindIfaceToDialer
+			if opt.fallbackBind {
+				bind = fallbackBindIfaceToDialer
+			}
+			if err := bind(opt.interfaceName, dialer, network, destination); err != nil {
+				return nil, err
+			}
+		}
+		if opt.routingMark == 0 {
+			opt.routingMark = int(DefaultRoutingMark.Load())
+		}
+		if opt.routingMark != 0 {
+			bindMarkToDialer(opt.routingMark, dialer, network, destination)
+		}
+		if opt.tfo && !DisableTFO {
+			return dialTFO(ctx, *dialer, network, address)
 		}
 	}
-	if opt.routingMark != 0 {
-		bindMarkToDialer(opt.routingMark, dialer, network, destination)
-	}
-	if opt.mpTcp {
-		setMultiPathTCP(dialer)
-	}
-	if opt.tfo && !DisableTFO {
-		return dialTFO(ctx, *dialer, network, address)
-	}
+
 	return dialer.DialContext(ctx, network, address)
 }
 
-func serialSingleStackDialContext(ctx context.Context, network string, ips []netip.Addr, port string, opt *option) (net.Conn, error) {
-	return serialDialContext(ctx, network, ips, port, opt)
-}
-
-func serialDualStackDialContext(ctx context.Context, network string, ips []netip.Addr, port string, opt *option) (net.Conn, error) {
-	return dualStackDialContext(ctx, serialDialContext, network, ips, port, opt)
-}
-
-func concurrentSingleStackDialContext(ctx context.Context, network string, ips []netip.Addr, port string, opt *option) (net.Conn, error) {
-	return parallelDialContext(ctx, network, ips, port, opt)
-}
-
-func concurrentDualStackDialContext(ctx context.Context, network string, ips []netip.Addr, port string, opt *option) (net.Conn, error) {
-	if opt.prefer != 4 && opt.prefer != 6 {
-		return parallelDialContext(ctx, network, ips, port, opt)
+func ICMPControl(destination netip.Addr) func(network, address string, conn syscall.RawConn) error {
+	return func(network, address string, conn syscall.RawConn) error {
+		if DefaultSocketHook != nil {
+			return DefaultSocketHook(network, address, conn)
+		}
+		dialer := &net.Dialer{}
+		interfaceName := DefaultInterface.Load()
+		if interfaceName == "" {
+			if finder := DefaultInterfaceFinder.Load(); finder != nil {
+				interfaceName = finder.FindInterfaceName(destination)
+			}
+		}
+		if interfaceName != "" {
+			if err := bindIfaceToDialer(interfaceName, dialer, network, destination); err != nil {
+				return err
+			}
+		}
+		routingMark := int(DefaultRoutingMark.Load())
+		if routingMark != 0 {
+			bindMarkToDialer(routingMark, dialer, network, destination)
+		}
+		if dialer.ControlContext != nil {
+			return dialer.ControlContext(context.TODO(), network, address, conn)
+		}
+		return nil
 	}
-	return dualStackDialContext(ctx, parallelDialContext, network, ips, port, opt)
 }
 
-func dualStackDialContext(ctx context.Context, dialFn dialFunc, network string, ips []netip.Addr, port string, opt *option) (net.Conn, error) {
+type dialFunc func(ctx context.Context, network string, ips []netip.Addr, port string, opt option) (net.Conn, error)
+
+func dualStackDialContext(ctx context.Context, dialFn dialFunc, network string, ips []netip.Addr, port string, opt option) (net.Conn, error) {
 	ipv4s, ipv6s := resolver.SortationAddr(ips)
 	if len(ipv4s) == 0 && len(ipv6s) == 0 {
 		return nil, ErrorNoIpAddress
 	}
+	if len(ipv4s) == 0 && len(ipv6s) != 0 {
+		return dialFn(ctx, network, ipv6s, port, opt)
+	}
+	if len(ipv4s) != 0 && len(ipv6s) == 0 {
+		return dialFn(ctx, network, ipv4s, port, opt)
+	}
 
 	preferIPVersion := opt.prefer
-	fallbackTicker := time.NewTicker(fallbackTimeout)
+	fallbackTicker := time.NewTicker(dualStackFallbackTimeout)
 	defer fallbackTicker.Stop()
 
 	results := make(chan dialResult)
@@ -251,6 +289,11 @@ loop:
 			}
 			if res.error == nil {
 				if res.isPrimary {
+					if fallback.error == nil && fallback.Conn != nil {
+						go func() { // close fallback connection in new goroutine to avoid blocking
+							_ = fallback.Conn.Close()
+						}()
+					}
 					return res.Conn, nil
 				}
 				fallback = res
@@ -270,9 +313,12 @@ loop:
 	return nil, errors.Join(errs...)
 }
 
-func parallelDialContext(ctx context.Context, network string, ips []netip.Addr, port string, opt *option) (net.Conn, error) {
+func parallelDialContext(ctx context.Context, network string, ips []netip.Addr, port string, opt option) (net.Conn, error) {
 	if len(ips) == 0 {
 		return nil, ErrorNoIpAddress
+	}
+	if len(ips) == 1 {
+		return dialContext(ctx, network, ips[0], port, opt)
 	}
 	results := make(chan dialResult)
 	returned := make(chan struct{})
@@ -309,7 +355,7 @@ func parallelDialContext(ctx context.Context, network string, ips []netip.Addr, 
 	return nil, os.ErrDeadlineExceeded
 }
 
-func serialDialContext(ctx context.Context, network string, ips []netip.Addr, port string, opt *option) (net.Conn, error) {
+func serialDialContext(ctx context.Context, network string, ips []netip.Addr, port string, opt option) (net.Conn, error) {
 	if len(ips) == 0 {
 		return nil, ErrorNoIpAddress
 	}
@@ -337,26 +383,18 @@ func parseAddr(ctx context.Context, network, address string, preferResolver reso
 		return nil, "-1", err
 	}
 
+	if preferResolver == nil {
+		preferResolver = resolver.ProxyServerHostResolver
+	}
+
 	var ips []netip.Addr
 	switch network {
 	case "tcp4", "udp4":
-		if preferResolver == nil {
-			ips, err = resolver.LookupIPv4ProxyServerHost(ctx, host)
-		} else {
-			ips, err = resolver.LookupIPv4WithResolver(ctx, host, preferResolver)
-		}
+		ips, err = resolver.LookupIPv4WithResolver(ctx, host, preferResolver)
 	case "tcp6", "udp6":
-		if preferResolver == nil {
-			ips, err = resolver.LookupIPv6ProxyServerHost(ctx, host)
-		} else {
-			ips, err = resolver.LookupIPv6WithResolver(ctx, host, preferResolver)
-		}
+		ips, err = resolver.LookupIPv6WithResolver(ctx, host, preferResolver)
 	default:
-		if preferResolver == nil {
-			ips, err = resolver.LookupIPProxyServerHost(ctx, host)
-		} else {
-			ips, err = resolver.LookupIPWithResolver(ctx, host, preferResolver)
-		}
+		ips, err = resolver.LookupIPWithResolver(ctx, host, preferResolver)
 	}
 	if err != nil {
 		return nil, "-1", fmt.Errorf("dns resolve failed: %w", err)
@@ -369,6 +407,15 @@ func parseAddr(ctx context.Context, network, address string, preferResolver reso
 	return ips, port, nil
 }
 
+func listenAddressIsLoopback(address string) bool {
+	host, _, err := net.SplitHostPort(address)
+	if err != nil {
+		host = address
+	}
+	ip, err := netip.ParseAddr(host)
+	return err == nil && ip.Unmap().IsLoopback()
+}
+
 type Dialer struct {
 	Opt option
 }
@@ -378,33 +425,10 @@ func (d Dialer) DialContext(ctx context.Context, network, address string) (net.C
 }
 
 func (d Dialer) ListenPacket(ctx context.Context, network, address string, rAddrPort netip.AddrPort) (net.PacketConn, error) {
-	opt := d.Opt // make a copy
-	if rAddrPort.Addr().Unmap().IsLoopback() {
-		// avoid "The requested address is not valid in its context."
-		WithInterface("")(&opt)
-	}
-	return ListenPacket(ctx, ParseNetwork(network, rAddrPort.Addr()), address, rAddrPort, WithOption(opt))
+	return ListenPacket(ctx, ParseNetwork(network, rAddrPort.Addr()), address, rAddrPort, WithOption(d.Opt))
 }
 
 func NewDialer(options ...Option) Dialer {
 	opt := applyOptions(options...)
-	return Dialer{Opt: *opt}
-}
-
-func GetIP4PEnable(enableIP4PConvert bool) {
-	IP4PEnable = enableIP4PConvert
-}
-
-// kanged from https://github.com/heiher/frp/blob/ip4p/client/ip4p.go
-
-func lookupIP4P(addr netip.Addr, port string) (netip.Addr, string) {
-	ip := addr.AsSlice()
-	if ip[0] == 0x20 && ip[1] == 0x01 &&
-		ip[2] == 0x00 && ip[3] == 0x00 {
-		addr = netip.AddrFrom4([4]byte{ip[12], ip[13], ip[14], ip[15]})
-		port = strconv.Itoa(int(ip[10])<<8 + int(ip[11]))
-		log.Debugln("Convert IP4P address %s to %s", ip, net.JoinHostPort(addr.String(), port))
-		return addr, port
-	}
-	return addr, port
+	return Dialer{Opt: opt}
 }

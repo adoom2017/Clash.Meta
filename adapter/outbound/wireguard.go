@@ -8,39 +8,51 @@ import (
 	"fmt"
 	"net"
 	"net/netip"
-	"runtime"
+	"os"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/metacubex/mihomo/common/atomic"
-	CN "github.com/metacubex/mihomo/common/net"
 	"github.com/metacubex/mihomo/component/dialer"
 	"github.com/metacubex/mihomo/component/proxydialer"
 	"github.com/metacubex/mihomo/component/resolver"
 	"github.com/metacubex/mihomo/component/slowdown"
 	C "github.com/metacubex/mihomo/constant"
+	"github.com/metacubex/mihomo/constant/features"
 	"github.com/metacubex/mihomo/dns"
 	"github.com/metacubex/mihomo/log"
 
+	amneziav3 "github.com/metacubex/amneziawg-go/device"
+	amnezia "github.com/metacubex/amneziawg-go/device_v1"
+	"github.com/metacubex/mipstack"
 	wireguard "github.com/metacubex/sing-wireguard"
+	"github.com/metacubex/wireguard-go/device"
+	"github.com/metacubex/wireguard-go/tun"
 
-	"github.com/sagernet/sing/common"
-	"github.com/sagernet/sing/common/debug"
-	E "github.com/sagernet/sing/common/exceptions"
-	M "github.com/sagernet/sing/common/metadata"
-	"github.com/sagernet/wireguard-go/device"
+	"github.com/metacubex/sing/common/debug"
+	E "github.com/metacubex/sing/common/exceptions"
+	M "github.com/metacubex/sing/common/metadata"
 )
+
+const (
+	ipStackAuto   = "auto"
+	ipStackGVisor = "gvisor"
+	ipStackMips   = "mips"
+)
+
+type wireguardGoDevice interface {
+	Close()
+	IpcSet(uapiConf string) error
+}
 
 type WireGuard struct {
 	*Base
 	bind      *wireguard.ClientBind
-	device    *device.Device
-	tunDevice wireguard.Device
-	dialer    proxydialer.SingDialer
-	resolver  *dns.Resolver
-	refP      *refProxyAdapter
+	device    wireguardGoDevice
+	tunDevice wireguardDevice
+	resolver  resolver.Resolver
 
 	initOk        atomic.Bool
 	initMutex     sync.Mutex
@@ -52,8 +64,6 @@ type WireGuard struct {
 	serverAddrMap   map[M.Socksaddr]netip.AddrPort
 	serverAddrTime  atomic.TypedValue[time.Time]
 	serverAddrMutex sync.Mutex
-
-	closeCh chan struct{} // for test
 }
 
 type WireGuardOption struct {
@@ -68,6 +78,10 @@ type WireGuardOption struct {
 	UDP                 bool   `proxy:"udp,omitempty"`
 	PersistentKeepalive int    `proxy:"persistent-keepalive,omitempty"`
 
+	IPStack IPStackOption `proxy:"ip-stack,omitempty"`
+
+	AmneziaWGOption *AmneziaWGOption `proxy:"amnezia-wg-option,omitempty"`
+
 	Peers []WireGuardPeerOption `proxy:"peers,omitempty"`
 
 	RemoteDnsResolve bool     `proxy:"remote-dns-resolve,omitempty"`
@@ -77,12 +91,209 @@ type WireGuardOption struct {
 }
 
 type WireGuardPeerOption struct {
-	Server       string   `proxy:"server"`
-	Port         int      `proxy:"port"`
+	Server       string   `proxy:"server,omitempty"`
+	Port         int      `proxy:"port,omitempty"`
 	PublicKey    string   `proxy:"public-key,omitempty"`
 	PreSharedKey string   `proxy:"pre-shared-key,omitempty"`
 	Reserved     []uint8  `proxy:"reserved,omitempty"`
 	AllowedIPs   []string `proxy:"allowed-ips,omitempty"`
+}
+
+type AmneziaWGOption struct {
+	Version int `proxy:"version,omitempty"` // Only version 3 uses the v3 implementation; all other values use the legacy implementation.
+
+	JC   int `proxy:"jc,omitempty"`
+	JMin int `proxy:"jmin,omitempty"`
+	JMax int `proxy:"jmax,omitempty"`
+	S1   int `proxy:"s1,omitempty"`
+	S2   int `proxy:"s2,omitempty"`
+	S3   int `proxy:"s3,omitempty"` // AmneziaWG v1.5+
+	S4   int `proxy:"s4,omitempty"` // AmneziaWG v1.5+
+
+	// H1-H4 accept uint32 values in v1.x and uint32 values or ranges in v2+.
+	// WeaklyTypedInput accepts both numeric and string representations.
+	H1 string `proxy:"h1,omitempty"`
+	H2 string `proxy:"h2,omitempty"`
+	H3 string `proxy:"h3,omitempty"`
+	H4 string `proxy:"h4,omitempty"`
+
+	I1 string `proxy:"i1,omitempty"` // AmneziaWG v1.5+
+	I2 string `proxy:"i2,omitempty"` // AmneziaWG v1.5+
+	I3 string `proxy:"i3,omitempty"` // AmneziaWG v1.5+
+	I4 string `proxy:"i4,omitempty"` // AmneziaWG v1.5+
+	I5 string `proxy:"i5,omitempty"` // AmneziaWG v1.5+
+
+	J1    string `proxy:"j1,omitempty"`    // AmneziaWG v1.5 only (removed in v2+)
+	J2    string `proxy:"j2,omitempty"`    // AmneziaWG v1.5 only (removed in v2+)
+	J3    string `proxy:"j3,omitempty"`    // AmneziaWG v1.5 only (removed in v2+)
+	Itime int64  `proxy:"itime,omitempty"` // AmneziaWG v1.5 only (removed in v2+)
+
+	// AmneziaWG v3+ only. Version must be 3, and these options cannot be combined with the v1.5-only options above.
+	HeaderProtectionKey    string `proxy:"header-protection-key,omitempty"`
+	ContentPaddingAddition string `proxy:"content-padding-addition,omitempty"`
+	RekeyAfterTime         string `proxy:"rekey-after-time,omitempty"`
+	RekeyTimeout           string `proxy:"rekey-timeout,omitempty"`
+	RejectAfterTime        string `proxy:"reject-after-time,omitempty"`
+	KeepaliveTimeout       string `proxy:"keepalive-timeout,omitempty"`
+	MaxHandshakeAttempts   string `proxy:"max-handshake-attempts,omitempty"`
+	RandomTrailers         bool   `proxy:"random-trailers,omitempty"` // AmneziaWG v3.1+
+	DisableCookies         bool   `proxy:"disable-cookies,omitempty"` // AmneziaWG v3.1+
+}
+
+type IPStackOption struct {
+	Mode                 string `proxy:"mode,omitempty"`
+	CongestionController string `proxy:"congestion-controller,omitempty"`
+}
+
+func (o *IPStackOption) normalize() {
+	o.Mode = strings.ToLower(o.Mode)
+	if o.Mode == "" {
+		o.Mode = ipStackAuto
+	}
+	o.CongestionController = strings.ToLower(o.CongestionController)
+}
+
+func (o IPStackOption) validate() error {
+	switch o.Mode {
+	case ipStackAuto, ipStackMips:
+	case ipStackGVisor:
+		if !features.WithGVisor {
+			return errors.New("gVisor IP stack requires the with_gvisor build tag")
+		}
+	default:
+		return fmt.Errorf("invalid IP stack mode %q; expected auto, gvisor, or mips", o.Mode)
+	}
+	switch o.CongestionController {
+	case "", mipstack.CongestionControlCUBIC, mipstack.CongestionControlReno, mipstack.CongestionControlBBR, mipstack.CongestionControlBBR3:
+		return nil
+	default:
+		return fmt.Errorf("invalid IP stack congestion controller %q; expected cubic, reno, bbr, or bbr3", o.CongestionController)
+	}
+}
+
+// ipStack is the mihomo IP stack's packet and socket surface, adapted from
+// sing-wireguard only for gVisor.
+type ipStack interface {
+	Start() error
+	DialTCP(ctx context.Context, network string, source, destination netip.AddrPort) (net.Conn, error)
+	DialUDP(ctx context.Context, network string, source, destination netip.AddrPort) (net.Conn, error)
+	DialIP(ctx context.Context, network string, source, destination netip.Addr) (net.Conn, error)
+	ListenTCP(ctx context.Context, network string, local netip.AddrPort) (net.Listener, error)
+	ListenUDP(ctx context.Context, network string, local netip.AddrPort) (net.PacketConn, error)
+	ListenIP(ctx context.Context, network string, local netip.Addr) (net.PacketConn, error)
+	Read(buffers [][]byte, sizes []int, offset int) (int, error)
+	Write(buffers [][]byte, offset int) (int, error)
+	MTU() (int, error)
+	Name() (string, error)
+	BatchSize() int
+	Close() error
+}
+
+// newIPStack constructs the selected userspace IP stack.
+func newIPStack(option IPStackOption, localAddresses []netip.Prefix, mtu uint32) (ipStack, error) {
+	mode := option.Mode
+	if mode == ipStackAuto {
+		if features.WithGVisor {
+			mode = ipStackGVisor
+		} else {
+			mode = ipStackMips
+		}
+	}
+	switch mode {
+	case ipStackGVisor:
+		return wireguard.NewStackDevice(localAddresses, mtu)
+	case ipStackMips:
+		return mipstack.New(mipstack.Config{
+			LocalAddresses: localAddresses,
+			MTU:            mtu,
+			TCP: mipstack.TCPSocketDefaults{
+				CongestionControl: option.CongestionController,
+				// Align with sing-wireguard: enable keepalive with 15-second
+				// idle/interval timing and gVisor's default probe count.
+				KeepAlive: true,
+				KeepAliveConfig: mipstack.KeepAliveConfig{
+					Idle: 15 * time.Second, Interval: 15 * time.Second, Count: 9,
+				},
+			},
+			IP: mipstack.IPSocketDefaults{
+				// Align with sing-wireguard: fellow its IP socket semantics
+				IPHeaderIncludedOnRead:  true,
+				IPHeaderIncludedOnWrite: true,
+			},
+		})
+	default:
+		return nil, errors.New("invalid IP stack mode")
+	}
+}
+
+var _ ipStack = (*mipstack.Stack)(nil)
+var _ ipStack = (wireguard.Device)(nil)
+
+type ipStackNetDialer struct {
+	stack ipStack
+}
+
+var _ dialer.NetDialer = (*ipStackNetDialer)(nil)
+
+func (d ipStackNetDialer) DialContext(ctx context.Context, network, address string) (net.Conn, error) {
+	dst, err := netip.ParseAddrPort(address)
+	if err != nil {
+		return nil, fmt.Errorf("invalid address %q: %w", address, err)
+	}
+	switch {
+	case strings.HasPrefix(network, "tcp"):
+		return d.stack.DialTCP(ctx, network, netip.AddrPort{}, dst)
+	case strings.HasPrefix(network, "udp"):
+		return d.stack.DialUDP(ctx, network, netip.AddrPort{}, dst)
+	default:
+		return nil, fmt.Errorf("invalid network %q", network)
+	}
+}
+
+type wireguardDevice interface {
+	ipStack
+	tun.Device
+}
+
+type ipStackWireguardDevice struct {
+	ipStack
+	events    chan tun.Event
+	closeOnce sync.Once
+}
+
+func (d *ipStackWireguardDevice) File() *os.File {
+	return nil
+}
+
+func (d *ipStackWireguardDevice) Events() <-chan tun.Event {
+	return d.events
+}
+
+func (d *ipStackWireguardDevice) Start() error {
+	d.events <- tun.EventUp
+	return nil
+}
+
+func (d *ipStackWireguardDevice) Close() error {
+	d.closeOnce.Do(func() {
+		close(d.events)
+	})
+	return d.ipStack.Close()
+}
+
+func newWireguardDevice(stack ipStack) (wireguardDevice, error) {
+	if wgDevice, ok := stack.(wireguardDevice); ok {
+		return wgDevice, nil
+	}
+	// mipstack must start at here
+	err := stack.Start()
+	if err != nil {
+		return nil, err
+	}
+	return &ipStackWireguardDevice{
+		ipStack: stack,
+		events:  make(chan tun.Event, 1),
+	}, nil
 }
 
 type wgSingErrorHandler struct {
@@ -143,18 +354,19 @@ func (option WireGuardOption) Prefixes() ([]netip.Prefix, error) {
 
 func NewWireGuard(option WireGuardOption) (*WireGuard, error) {
 	outbound := &WireGuard{
-		Base: &Base{
-			name:   option.Name,
-			addr:   net.JoinHostPort(option.Server, strconv.Itoa(option.Port)),
-			tp:     C.WireGuard,
-			udp:    option.UDP,
-			iface:  option.Interface,
-			rmark:  option.RoutingMark,
-			prefer: C.NewDNSPrefer(option.IPVersion),
-		},
-		dialer: proxydialer.NewSlowDownSingDialer(proxydialer.NewByNameSingDialer(option.DialerProxy, dialer.NewDialer()), slowdown.New()),
+		Base: NewBase(BaseOption{
+			Name:         option.Name,
+			Addr:         net.JoinHostPort(option.Server, strconv.Itoa(option.Port)),
+			Type:         C.WireGuard,
+			ProviderName: option.ProviderName,
+			UDP:          option.UDP,
+			Interface:    option.Interface,
+			RoutingMark:  option.RoutingMark,
+			Prefer:       option.IPVersion,
+		}),
 	}
-	runtime.SetFinalizer(outbound, closeWireGuard)
+	outbound.dialer = option.NewDialer(outbound.DialOptions())
+	singDialer := proxydialer.NewSingDialer(proxydialer.NewSlowDownDialer(outbound.dialer, slowdown.New()))
 
 	var reserved [3]uint8
 	if len(option.Reserved) > 0 {
@@ -172,7 +384,11 @@ func NewWireGuard(option WireGuardOption) (*WireGuard, error) {
 			outbound.connectAddr = option.Addr()
 		}
 	}
-	outbound.bind = wireguard.NewClientBind(context.Background(), wgSingErrorHandler{outbound.Name()}, outbound.dialer, isConnect, outbound.connectAddr.AddrPort(), reserved)
+	outbound.bind = wireguard.NewClientBind(context.Background(), wgSingErrorHandler{outbound.Name()}, singDialer, isConnect, outbound.connectAddr.AddrPort(), reserved)
+
+	if outbound.bind == nil {
+		return nil, E.New("failed to create wireguard client bind")
+	}
 
 	var err error
 	outbound.localPrefixes, err = option.Prefixes()
@@ -231,27 +447,55 @@ func NewWireGuard(option WireGuardOption) (*WireGuard, error) {
 			option.PreSharedKey = hex.EncodeToString(bytes)
 		}
 	}
+	if option.AmneziaWGOption != nil && option.AmneziaWGOption.HeaderProtectionKey != "" {
+		bytes, err := base64.StdEncoding.DecodeString(option.AmneziaWGOption.HeaderProtectionKey)
+		if err != nil {
+			return nil, E.Cause(err, "decode header protection key")
+		}
+		option.AmneziaWGOption.HeaderProtectionKey = hex.EncodeToString(bytes)
+	}
 	outbound.option = option
 
 	mtu := option.MTU
 	if mtu == 0 {
 		mtu = 1408
 	}
+	option.IPStack.normalize()
+	if err = option.IPStack.validate(); err != nil {
+		return nil, err
+	}
 	if len(outbound.localPrefixes) == 0 {
 		return nil, E.New("missing local address")
 	}
-	outbound.tunDevice, err = wireguard.NewStackDevice(outbound.localPrefixes, uint32(mtu))
+
+	stack, err := newIPStack(option.IPStack, outbound.localPrefixes, uint32(mtu))
 	if err != nil {
+		return nil, E.Cause(err, "create WireGuard stack")
+	}
+	outbound.tunDevice, err = newWireguardDevice(stack)
+	if err != nil {
+		_ = stack.Close()
 		return nil, E.Cause(err, "create WireGuard device")
 	}
-	outbound.device = device.NewDevice(context.Background(), outbound.tunDevice, outbound.bind, &device.Logger{
+
+	logger := &device.Logger{
 		Verbosef: func(format string, args ...interface{}) {
 			log.SingLogger.Debug(fmt.Sprintf("[WG](%s) %s", option.Name, fmt.Sprintf(format, args...)))
 		},
 		Errorf: func(format string, args ...interface{}) {
 			log.SingLogger.Error(fmt.Sprintf("[WG](%s) %s", option.Name, fmt.Sprintf(format, args...)))
 		},
-	}, option.Workers)
+	}
+	if option.AmneziaWGOption != nil {
+		outbound.bind.SetParseReserved(false) // AmneziaWG don't need parse reserved
+		if option.AmneziaWGOption.Version == 3 {
+			outbound.device = amneziav3.NewDevice(outbound.tunDevice, outbound.bind, logger, option.Workers)
+		} else {
+			outbound.device = amnezia.NewDevice(outbound.tunDevice, outbound.bind, logger, option.Workers)
+		}
+	} else {
+		outbound.device = device.NewDevice(outbound.tunDevice, outbound.bind, logger, option.Workers)
+	}
 
 	var has6 bool
 	for _, address := range outbound.localPrefixes {
@@ -261,15 +505,13 @@ func NewWireGuard(option WireGuardOption) (*WireGuard, error) {
 		}
 	}
 
-	refP := &refProxyAdapter{}
-	outbound.refP = refP
 	if option.RemoteDnsResolve && len(option.Dns) > 0 {
 		nss, err := dns.ParseNameServer(option.Dns)
 		if err != nil {
 			return nil, err
 		}
 		for i := range nss {
-			nss[i].ProxyAdapter = refP
+			nss[i].ProxyAdapter = outbound
 		}
 		outbound.resolver = dns.NewResolver(dns.Config{
 			Main: nss,
@@ -284,7 +526,7 @@ func (w *WireGuard) resolve(ctx context.Context, address M.Socksaddr) (netip.Add
 	if address.Addr.IsValid() {
 		return address.AddrPort(), nil
 	}
-	udpAddr, err := resolveUDPAddrWithPrefer(ctx, "udp", address.String(), w.prefer)
+	udpAddr, err := resolveUDPAddr(ctx, "udp", address.String(), w.prefer)
 	if err != nil {
 		return netip.AddrPort{}, err
 	}
@@ -368,6 +610,95 @@ func (w *WireGuard) genIpcConf(ctx context.Context, updateOnly bool) (string, er
 	ipcConf := ""
 	if !updateOnly {
 		ipcConf += "private_key=" + w.option.PrivateKey + "\n"
+		if w.option.AmneziaWGOption != nil {
+			if w.option.AmneziaWGOption.JC != 0 {
+				ipcConf += "jc=" + strconv.Itoa(w.option.AmneziaWGOption.JC) + "\n"
+			}
+			if w.option.AmneziaWGOption.JMin != 0 {
+				ipcConf += "jmin=" + strconv.Itoa(w.option.AmneziaWGOption.JMin) + "\n"
+			}
+			if w.option.AmneziaWGOption.JMax != 0 {
+				ipcConf += "jmax=" + strconv.Itoa(w.option.AmneziaWGOption.JMax) + "\n"
+			}
+			if w.option.AmneziaWGOption.S1 != 0 {
+				ipcConf += "s1=" + strconv.Itoa(w.option.AmneziaWGOption.S1) + "\n"
+			}
+			if w.option.AmneziaWGOption.S2 != 0 {
+				ipcConf += "s2=" + strconv.Itoa(w.option.AmneziaWGOption.S2) + "\n"
+			}
+			if w.option.AmneziaWGOption.S3 != 0 {
+				ipcConf += "s3=" + strconv.Itoa(w.option.AmneziaWGOption.S3) + "\n"
+			}
+			if w.option.AmneziaWGOption.S4 != 0 {
+				ipcConf += "s4=" + strconv.Itoa(w.option.AmneziaWGOption.S4) + "\n"
+			}
+			if w.option.AmneziaWGOption.H1 != "" {
+				ipcConf += "h1=" + w.option.AmneziaWGOption.H1 + "\n"
+			}
+			if w.option.AmneziaWGOption.H2 != "" {
+				ipcConf += "h2=" + w.option.AmneziaWGOption.H2 + "\n"
+			}
+			if w.option.AmneziaWGOption.H3 != "" {
+				ipcConf += "h3=" + w.option.AmneziaWGOption.H3 + "\n"
+			}
+			if w.option.AmneziaWGOption.H4 != "" {
+				ipcConf += "h4=" + w.option.AmneziaWGOption.H4 + "\n"
+			}
+			if w.option.AmneziaWGOption.I1 != "" {
+				ipcConf += "i1=" + w.option.AmneziaWGOption.I1 + "\n"
+			}
+			if w.option.AmneziaWGOption.I2 != "" {
+				ipcConf += "i2=" + w.option.AmneziaWGOption.I2 + "\n"
+			}
+			if w.option.AmneziaWGOption.I3 != "" {
+				ipcConf += "i3=" + w.option.AmneziaWGOption.I3 + "\n"
+			}
+			if w.option.AmneziaWGOption.I4 != "" {
+				ipcConf += "i4=" + w.option.AmneziaWGOption.I4 + "\n"
+			}
+			if w.option.AmneziaWGOption.I5 != "" {
+				ipcConf += "i5=" + w.option.AmneziaWGOption.I5 + "\n"
+			}
+			if w.option.AmneziaWGOption.J1 != "" {
+				ipcConf += "j1=" + w.option.AmneziaWGOption.J1 + "\n"
+			}
+			if w.option.AmneziaWGOption.J2 != "" {
+				ipcConf += "j2=" + w.option.AmneziaWGOption.J2 + "\n"
+			}
+			if w.option.AmneziaWGOption.J3 != "" {
+				ipcConf += "j3=" + w.option.AmneziaWGOption.J3 + "\n"
+			}
+			if w.option.AmneziaWGOption.Itime != 0 {
+				ipcConf += "itime=" + strconv.FormatInt(int64(w.option.AmneziaWGOption.Itime), 10) + "\n"
+			}
+			if w.option.AmneziaWGOption.HeaderProtectionKey != "" {
+				ipcConf += "header_protection_key=" + w.option.AmneziaWGOption.HeaderProtectionKey + "\n"
+			}
+			if w.option.AmneziaWGOption.ContentPaddingAddition != "" {
+				ipcConf += "content_padding_addition=" + w.option.AmneziaWGOption.ContentPaddingAddition + "\n"
+			}
+			if w.option.AmneziaWGOption.RekeyAfterTime != "" {
+				ipcConf += "rekey_after_time=" + w.option.AmneziaWGOption.RekeyAfterTime + "\n"
+			}
+			if w.option.AmneziaWGOption.RekeyTimeout != "" {
+				ipcConf += "rekey_timeout=" + w.option.AmneziaWGOption.RekeyTimeout + "\n"
+			}
+			if w.option.AmneziaWGOption.RejectAfterTime != "" {
+				ipcConf += "reject_after_time=" + w.option.AmneziaWGOption.RejectAfterTime + "\n"
+			}
+			if w.option.AmneziaWGOption.KeepaliveTimeout != "" {
+				ipcConf += "keepalive_timeout=" + w.option.AmneziaWGOption.KeepaliveTimeout + "\n"
+			}
+			if w.option.AmneziaWGOption.MaxHandshakeAttempts != "" {
+				ipcConf += "max_handshake_attempts=" + w.option.AmneziaWGOption.MaxHandshakeAttempts + "\n"
+			}
+			if w.option.AmneziaWGOption.RandomTrailers {
+				ipcConf += "random_trailers=1\n"
+			}
+			if w.option.AmneziaWGOption.DisableCookies {
+				ipcConf += "disable_cookies=1\n"
+			}
+		}
 	}
 	if len(w.option.Peers) > 0 {
 		for i, peer := range w.option.Peers {
@@ -392,7 +723,7 @@ func (w *WireGuard) genIpcConf(ctx context.Context, updateOnly bool) (string, er
 			ipcConf += "endpoint=" + destination.String() + "\n"
 			if len(peer.Reserved) > 0 {
 				var reserved [3]uint8
-				copy(reserved[:], w.option.Reserved)
+				copy(reserved[:], peer.Reserved)
 				w.bind.SetReservedForEndpoint(destination, reserved)
 			}
 			if updateOnly {
@@ -452,19 +783,15 @@ func (w *WireGuard) genIpcConf(ctx context.Context, updateOnly bool) (string, er
 	return ipcConf, nil
 }
 
-func closeWireGuard(w *WireGuard) {
+// Close implements C.ProxyAdapter
+func (w *WireGuard) Close() error {
 	if w.device != nil {
 		w.device.Close()
 	}
-	_ = common.Close(w.tunDevice)
-	if w.closeCh != nil {
-		close(w.closeCh)
-	}
+	return nil
 }
 
-func (w *WireGuard) DialContext(ctx context.Context, metadata *C.Metadata, opts ...dialer.Option) (_ C.Conn, err error) {
-	options := w.Base.DialOptions(opts...)
-	w.dialer.SetDialer(dialer.NewDialer(options...))
+func (w *WireGuard) DialContext(ctx context.Context, metadata *C.Metadata) (_ C.Conn, err error) {
 	var conn net.Conn
 	if err = w.init(ctx); err != nil {
 		return nil, err
@@ -472,15 +799,14 @@ func (w *WireGuard) DialContext(ctx context.Context, metadata *C.Metadata, opts 
 	if !metadata.Resolved() || w.resolver != nil {
 		r := resolver.DefaultResolver
 		if w.resolver != nil {
-			w.refP.SetProxyAdapter(w)
-			defer w.refP.ClearProxyAdapter()
 			r = w.resolver
 		}
+		options := w.DialOptions()
 		options = append(options, dialer.WithResolver(r))
-		options = append(options, dialer.WithNetDialer(wgNetDialer{tunDevice: w.tunDevice}))
+		options = append(options, dialer.WithNetDialer(ipStackNetDialer{stack: w.tunDevice}))
 		conn, err = dialer.NewDialer(options...).DialContext(ctx, "tcp", metadata.RemoteAddress())
 	} else {
-		conn, err = w.tunDevice.DialContext(ctx, "tcp", M.SocksaddrFrom(metadata.DstIP, metadata.DstPort).Unwrap())
+		conn, err = w.tunDevice.DialTCP(ctx, "tcp", netip.AddrPort{}, metadata.AddrPort())
 	}
 	if err != nil {
 		return nil, err
@@ -488,176 +814,51 @@ func (w *WireGuard) DialContext(ctx context.Context, metadata *C.Metadata, opts 
 	if conn == nil {
 		return nil, E.New("conn is nil")
 	}
-	return NewConn(CN.NewRefConn(conn, w), w), nil
+	return NewConn(conn, w), nil
 }
 
-func (w *WireGuard) ListenPacketContext(ctx context.Context, metadata *C.Metadata, opts ...dialer.Option) (_ C.PacketConn, err error) {
-	options := w.Base.DialOptions(opts...)
-	w.dialer.SetDialer(dialer.NewDialer(options...))
+func (w *WireGuard) ListenPacketContext(ctx context.Context, metadata *C.Metadata) (_ C.PacketConn, err error) {
 	var pc net.PacketConn
 	if err = w.init(ctx); err != nil {
 		return nil, err
 	}
-	if (!metadata.Resolved() || w.resolver != nil) && metadata.Host != "" {
-		r := resolver.DefaultResolver
-		if w.resolver != nil {
-			w.refP.SetProxyAdapter(w)
-			defer w.refP.ClearProxyAdapter()
-			r = w.resolver
-		}
-		ip, err := resolver.ResolveIPWithResolver(ctx, metadata.Host, r)
-		if err != nil {
-			return nil, errors.New("can't resolve ip")
-		}
-		metadata.DstIP = ip
+	if err = w.ResolveUDP(ctx, metadata); err != nil {
+		return nil, err
 	}
-	pc, err = w.tunDevice.ListenPacket(ctx, M.SocksaddrFrom(metadata.DstIP, metadata.DstPort).Unwrap())
+	// The ipStack contract guarantees that a generic UDP wildcard supports both address families.
+	pc, err = w.tunDevice.ListenUDP(ctx, "udp", netip.AddrPort{})
 	if err != nil {
 		return nil, err
 	}
 	if pc == nil {
 		return nil, E.New("packetConn is nil")
 	}
-	return newPacketConn(CN.NewRefPacketConn(pc, w), w), nil
+	return NewPacketConn(pc, w), nil
+}
+
+func (w *WireGuard) ResolveUDP(ctx context.Context, metadata *C.Metadata) error {
+	if (!metadata.Resolved() || w.resolver != nil) && metadata.Host != "" {
+		r := resolver.DefaultResolver
+		if w.resolver != nil {
+			r = w.resolver
+		}
+		ip, err := resolveIPWithResolver(ctx, metadata.Host, w.prefer, r)
+		if err != nil {
+			return fmt.Errorf("can't resolve ip: %w", err)
+		}
+		metadata.DstIP = ip
+	}
+	return nil
+}
+
+// ProxyInfo implements C.ProxyAdapter
+func (w *WireGuard) ProxyInfo() C.ProxyInfo {
+	info := w.Base.ProxyInfo()
+	info.DialerProxy = w.option.DialerProxy
+	return info
 }
 
 // IsL3Protocol implements C.ProxyAdapter
 func (w *WireGuard) IsL3Protocol(metadata *C.Metadata) bool {
 	return true
 }
-
-type refProxyAdapter struct {
-	proxyAdapter C.ProxyAdapter
-	count        int
-	mutex        sync.Mutex
-}
-
-func (r *refProxyAdapter) SetProxyAdapter(proxyAdapter C.ProxyAdapter) {
-	r.mutex.Lock()
-	defer r.mutex.Unlock()
-	r.proxyAdapter = proxyAdapter
-	r.count++
-}
-
-func (r *refProxyAdapter) ClearProxyAdapter() {
-	r.mutex.Lock()
-	defer r.mutex.Unlock()
-	r.count--
-	if r.count == 0 {
-		r.proxyAdapter = nil
-	}
-}
-
-func (r *refProxyAdapter) Name() string {
-	if r.proxyAdapter != nil {
-		return r.proxyAdapter.Name()
-	}
-	return ""
-}
-
-func (r *refProxyAdapter) Type() C.AdapterType {
-	if r.proxyAdapter != nil {
-		return r.proxyAdapter.Type()
-	}
-	return C.AdapterType(0)
-}
-
-func (r *refProxyAdapter) Addr() string {
-	if r.proxyAdapter != nil {
-		return r.proxyAdapter.Addr()
-	}
-	return ""
-}
-
-func (r *refProxyAdapter) SupportUDP() bool {
-	if r.proxyAdapter != nil {
-		return r.proxyAdapter.SupportUDP()
-	}
-	return false
-}
-
-func (r *refProxyAdapter) SupportXUDP() bool {
-	if r.proxyAdapter != nil {
-		return r.proxyAdapter.SupportXUDP()
-	}
-	return false
-}
-
-func (r *refProxyAdapter) SupportTFO() bool {
-	if r.proxyAdapter != nil {
-		return r.proxyAdapter.SupportTFO()
-	}
-	return false
-}
-
-func (r *refProxyAdapter) MarshalJSON() ([]byte, error) {
-	if r.proxyAdapter != nil {
-		return r.proxyAdapter.MarshalJSON()
-	}
-	return nil, C.ErrNotSupport
-}
-
-func (r *refProxyAdapter) StreamConnContext(ctx context.Context, c net.Conn, metadata *C.Metadata) (net.Conn, error) {
-	if r.proxyAdapter != nil {
-		return r.proxyAdapter.StreamConnContext(ctx, c, metadata)
-	}
-	return nil, C.ErrNotSupport
-}
-
-func (r *refProxyAdapter) DialContext(ctx context.Context, metadata *C.Metadata, opts ...dialer.Option) (C.Conn, error) {
-	if r.proxyAdapter != nil {
-		return r.proxyAdapter.DialContext(ctx, metadata, opts...)
-	}
-	return nil, C.ErrNotSupport
-}
-
-func (r *refProxyAdapter) ListenPacketContext(ctx context.Context, metadata *C.Metadata, opts ...dialer.Option) (C.PacketConn, error) {
-	if r.proxyAdapter != nil {
-		return r.proxyAdapter.ListenPacketContext(ctx, metadata, opts...)
-	}
-	return nil, C.ErrNotSupport
-}
-
-func (r *refProxyAdapter) SupportUOT() bool {
-	if r.proxyAdapter != nil {
-		return r.proxyAdapter.SupportUOT()
-	}
-	return false
-}
-
-func (r *refProxyAdapter) SupportWithDialer() C.NetWork {
-	if r.proxyAdapter != nil {
-		return r.proxyAdapter.SupportWithDialer()
-	}
-	return C.InvalidNet
-}
-
-func (r *refProxyAdapter) DialContextWithDialer(ctx context.Context, dialer C.Dialer, metadata *C.Metadata) (C.Conn, error) {
-	if r.proxyAdapter != nil {
-		return r.proxyAdapter.DialContextWithDialer(ctx, dialer, metadata)
-	}
-	return nil, C.ErrNotSupport
-}
-
-func (r *refProxyAdapter) ListenPacketWithDialer(ctx context.Context, dialer C.Dialer, metadata *C.Metadata) (C.PacketConn, error) {
-	if r.proxyAdapter != nil {
-		return r.proxyAdapter.ListenPacketWithDialer(ctx, dialer, metadata)
-	}
-	return nil, C.ErrNotSupport
-}
-
-func (r *refProxyAdapter) IsL3Protocol(metadata *C.Metadata) bool {
-	if r.proxyAdapter != nil {
-		return r.proxyAdapter.IsL3Protocol(metadata)
-	}
-	return false
-}
-
-func (r *refProxyAdapter) Unwrap(metadata *C.Metadata, touch bool) C.Proxy {
-	if r.proxyAdapter != nil {
-		return r.proxyAdapter.Unwrap(metadata, touch)
-	}
-	return nil
-}
-
-var _ C.ProxyAdapter = (*refProxyAdapter)(nil)

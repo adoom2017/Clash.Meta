@@ -9,7 +9,7 @@ import (
 	"github.com/metacubex/mihomo/common/atomic"
 	N "github.com/metacubex/mihomo/common/net"
 	"github.com/metacubex/mihomo/common/pool"
-	"github.com/metacubex/mihomo/transport/tuic/common"
+	"github.com/metacubex/mihomo/transport/tuic/types"
 
 	"github.com/metacubex/quic-go"
 	"github.com/metacubex/randv2"
@@ -17,13 +17,13 @@ import (
 
 type quicStreamPacketConn struct {
 	connId    uint16
-	quicConn  quic.Connection
+	quicConn  *quic.Conn
 	inputConn *N.BufferedConn
 
-	udpRelayMode          common.UdpRelayMode
+	udpRelayMode          types.UdpRelayMode
 	maxUdpRelayPacketSize int
 
-	deferQuicConnFn func(quicConn quic.Connection, err error)
+	deferQuicConnFn func(quicConn *quic.Conn, err error)
 	closeDeferFn    func()
 	writeClosed     *atomic.Bool
 
@@ -61,7 +61,7 @@ func (q *quicStreamPacketConn) close() (err error) {
 		if err != nil {
 			return
 		}
-		var stream quic.SendStream
+		var stream *quic.SendStream
 		stream, err = q.quicConn.OpenUniStream()
 		if err != nil {
 			return
@@ -104,7 +104,7 @@ func (q *quicStreamPacketConn) ReadFrom(p []byte) (n int, addr net.Addr, err err
 				return
 			}
 			if packetPtr := q.deFragger.Feed(&packet); packetPtr != nil {
-				n = copy(p, packet.DATA)
+				n = copy(p, packetPtr.DATA)
 				addr = packetPtr.ADDR.UDPAddr()
 				return
 			}
@@ -160,12 +160,12 @@ func (q *quicStreamPacketConn) WriteTo(p []byte, addr net.Addr) (n int, err erro
 	pktId := uint16(randv2.Uint32())
 	packet := NewPacket(q.connId, pktId, 1, 0, uint16(len(p)), address, p)
 	switch q.udpRelayMode {
-	case common.QUIC:
+	case types.QUIC:
 		err = packet.WriteTo(buf)
 		if err != nil {
 			return
 		}
-		var stream quic.SendStream
+		var stream *quic.SendStream
 		stream, err = q.quicConn.OpenUniStream()
 		if err != nil {
 			return

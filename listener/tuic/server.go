@@ -2,23 +2,25 @@ package tuic
 
 import (
 	"context"
-	"crypto/tls"
 	"net"
 	"strings"
 	"time"
 
 	"github.com/metacubex/mihomo/adapter/inbound"
-	CN "github.com/metacubex/mihomo/common/net"
 	"github.com/metacubex/mihomo/common/sockopt"
+	"github.com/metacubex/mihomo/component/ca"
+	"github.com/metacubex/mihomo/component/ech"
 	C "github.com/metacubex/mihomo/constant"
 	LC "github.com/metacubex/mihomo/listener/config"
 	"github.com/metacubex/mihomo/listener/sing"
 	"github.com/metacubex/mihomo/log"
+	"github.com/metacubex/mihomo/ntp"
 	"github.com/metacubex/mihomo/transport/socks5"
 	"github.com/metacubex/mihomo/transport/tuic"
 
 	"github.com/gofrs/uuid/v5"
 	"github.com/metacubex/quic-go"
+	"github.com/metacubex/tls"
 	"golang.org/x/exp/slices"
 )
 
@@ -31,7 +33,7 @@ type Listener struct {
 	servers      []*tuic.Server
 }
 
-func New(config LC.TuicServer, tunnel C.Tunnel, additions ...inbound.Addition) (*Listener, error) {
+func New(config LC.TuicServer, lc C.InboundListenConfig, tunnel C.Tunnel, additions ...inbound.Addition) (*Listener, error) {
 	if len(additions) == 0 {
 		additions = []inbound.Addition{
 			inbound.WithInName("DEFAULT-TUIC"),
@@ -48,25 +50,57 @@ func New(config LC.TuicServer, tunnel C.Tunnel, additions ...inbound.Addition) (
 		return nil, err
 	}
 
-	cert, err := CN.ParseCert(config.Certificate, config.PrivateKey, C.Path)
+	tlsConfig := &tls.Config{
+		Time:       ntp.Now,
+		MinVersion: tls.VersionTLS13,
+	}
+	certLoader, err := ca.NewTLSKeyPairLoader(config.Certificate, config.PrivateKey)
 	if err != nil {
 		return nil, err
 	}
-	tlsConfig := &tls.Config{
-		MinVersion:   tls.VersionTLS13,
-		Certificates: []tls.Certificate{cert},
+	tlsConfig.GetCertificate = func(*tls.ClientHelloInfo) (*tls.Certificate, error) {
+		return certLoader()
+	}
+	tlsConfig.ClientAuth = ca.ClientAuthTypeFromString(config.ClientAuthType)
+	if len(config.ClientAuthCert) > 0 {
+		if tlsConfig.ClientAuth == tls.NoClientCert {
+			tlsConfig.ClientAuth = tls.RequireAndVerifyClientCert
+		}
+	}
+	if tlsConfig.ClientAuth == tls.VerifyClientCertIfGiven || tlsConfig.ClientAuth == tls.RequireAndVerifyClientCert {
+		pool, err := ca.LoadCertificates(config.ClientAuthCert)
+		if err != nil {
+			return nil, err
+		}
+		tlsConfig.ClientCAs = pool
+	}
+
+	if config.EchKey != "" {
+		err = ech.LoadECHKey(config.EchKey, tlsConfig)
+		if err != nil {
+			return nil, err
+		}
 	}
 	if len(config.ALPN) > 0 {
 		tlsConfig.NextProtos = config.ALPN
 	} else {
 		tlsConfig.NextProtos = []string{"h3"}
 	}
+
+	if config.MaxIdleTime == 0 {
+		config.MaxIdleTime = 15000
+	}
+	if config.AuthenticationTimeout == 0 {
+		config.AuthenticationTimeout = 1000
+	}
+
 	quicConfig := &quic.Config{
 		MaxIdleTimeout:        time.Duration(config.MaxIdleTime) * time.Millisecond,
 		MaxIncomingStreams:    ServerMaxIncomingStreams,
 		MaxIncomingUniStreams: ServerMaxIncomingStreams,
 		EnableDatagrams:       true,
 		Allow0RTT:             true,
+		DisablePathManager:    true, // for port hopping
 	}
 	quicConfig.InitialStreamReceiveWindow = tuic.DefaultStreamReceiveWindow / 10
 	quicConfig.MaxStreamReceiveWindow = tuic.DefaultStreamReceiveWindow
@@ -93,29 +127,20 @@ func New(config LC.TuicServer, tunnel C.Tunnel, additions ...inbound.Addition) (
 	quicConfig.MaxDatagramFrameSize = int64(maxDatagramFrameSize)
 
 	handleTcpFn := func(conn net.Conn, addr socks5.Addr, _additions ...inbound.Addition) error {
-		newAdditions := additions
-		if len(_additions) > 0 {
-			newAdditions = slices.Clone(additions)
-			newAdditions = append(newAdditions, _additions...)
-		}
-		conn, metadata := inbound.NewSocket(addr, conn, C.TUIC, newAdditions...)
-		if h.IsSpecialFqdn(metadata.Host) {
-			go func() { // ParseSpecialFqdn will block, so open a new goroutine
-				_ = h.ParseSpecialFqdn(
-					sing.WithAdditions(context.Background(), newAdditions...),
-					conn,
-					sing.ConvertMetadata(metadata),
-				)
-			}()
-			return nil
-		}
-		go tunnel.HandleTCPConn(conn, metadata)
+		//newAdditions := additions
+		//if len(_additions) > 0 {
+		//	newAdditions = slices.Clip(additions) // force the subsequent `append()` to copy the slice
+		//	newAdditions = append(newAdditions, _additions...)
+		//}
+		//conn, metadata := inbound.NewSocket(addr, conn, C.TUIC, newAdditions...)
+		//go tunnel.HandleTCPConn(conn, metadata)
+		go h.HandleSocket(addr, conn, _additions...) // h.HandleSocket will block, so open a new goroutine
 		return nil
 	}
 	handleUdpFn := func(addr socks5.Addr, packet C.UDPPacket, _additions ...inbound.Addition) error {
 		newAdditions := additions
 		if len(_additions) > 0 {
-			newAdditions = slices.Clone(additions)
+			newAdditions = slices.Clip(additions) // force the subsequent `append()` to copy the slice
 			newAdditions = append(newAdditions, _additions...)
 		}
 		tunnel.HandleUDPPacket(inbound.NewPacket(addr, packet, C.TUIC, newAdditions...))
@@ -131,6 +156,7 @@ func New(config LC.TuicServer, tunnel C.Tunnel, additions ...inbound.Addition) (
 		AuthenticationTimeout: time.Duration(config.AuthenticationTimeout) * time.Millisecond,
 		MaxUdpRelayPacketSize: config.MaxUdpRelayPacketSize,
 		CWND:                  config.CWND,
+		BBRProfile:            config.BBRProfile,
 	}
 	if len(config.Token) > 0 {
 		tokens := make([][32]byte, len(config.Token))
@@ -152,13 +178,12 @@ func New(config LC.TuicServer, tunnel C.Tunnel, additions ...inbound.Addition) (
 	for _, addr := range strings.Split(config.Listen, ",") {
 		addr := addr
 
-		ul, err := net.ListenPacket("udp", addr)
+		ul, err := lc.ListenPacket(context.Background(), "udp", addr)
 		if err != nil {
 			return nil, err
 		}
 
-		err = sockopt.UDPReuseaddr(ul.(*net.UDPConn))
-		if err != nil {
+		if err := sockopt.UDPReuseaddr(ul); err != nil {
 			log.Warnln("Failed to Reuse UDP Address: %s", err)
 		}
 

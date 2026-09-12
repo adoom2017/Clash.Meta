@@ -7,25 +7,25 @@ import (
 	"fmt"
 	"net"
 	"os"
-	"runtime"
 	"strconv"
 	"strings"
 	"sync"
 
 	N "github.com/metacubex/mihomo/common/net"
-	"github.com/metacubex/mihomo/component/dialer"
-	"github.com/metacubex/mihomo/component/proxydialer"
 	C "github.com/metacubex/mihomo/constant"
 
 	"github.com/metacubex/randv2"
-	"golang.org/x/crypto/ssh"
+	"github.com/metacubex/ssh"
 )
 
 type Ssh struct {
 	*Base
 
 	option *SshOption
-	client *sshClient // using a standalone struct to avoid its inner loop invalidate the Finalizer
+
+	config *ssh.ClientConfig
+	client *ssh.Client
+	cMutex sync.Mutex
 }
 
 type SshOption struct {
@@ -41,15 +41,8 @@ type SshOption struct {
 	HostKeyAlgorithms    []string `proxy:"host-key-algorithms,omitempty"`
 }
 
-func (s *Ssh) DialContext(ctx context.Context, metadata *C.Metadata, opts ...dialer.Option) (_ C.Conn, err error) {
-	var cDialer C.Dialer = dialer.NewDialer(s.Base.DialOptions(opts...)...)
-	if len(s.option.DialerProxy) > 0 {
-		cDialer, err = proxydialer.NewByName(s.option.DialerProxy, cDialer)
-		if err != nil {
-			return nil, err
-		}
-	}
-	client, err := s.client.connect(ctx, cDialer, s.addr)
+func (s *Ssh) DialContext(ctx context.Context, metadata *C.Metadata) (_ C.Conn, err error) {
+	client, err := s.connect(ctx, s.addr)
 	if err != nil {
 		return nil, err
 	}
@@ -58,26 +51,19 @@ func (s *Ssh) DialContext(ctx context.Context, metadata *C.Metadata, opts ...dia
 		return nil, err
 	}
 
-	return NewConn(N.NewRefConn(c, s), s), nil
+	return NewConn(c, s), nil
 }
 
-type sshClient struct {
-	config *ssh.ClientConfig
-	client *ssh.Client
-	cMutex sync.Mutex
-}
-
-func (s *sshClient) connect(ctx context.Context, cDialer C.Dialer, addr string) (client *ssh.Client, err error) {
+func (s *Ssh) connect(ctx context.Context, addr string) (client *ssh.Client, err error) {
 	s.cMutex.Lock()
 	defer s.cMutex.Unlock()
 	if s.client != nil {
 		return s.client, nil
 	}
-	c, err := cDialer.DialContext(ctx, "tcp", addr)
+	c, err := s.dialer.DialContext(ctx, "tcp", addr)
 	if err != nil {
 		return nil, err
 	}
-	N.TCPKeepAlive(c)
 
 	defer func(c net.Conn) {
 		safeConnClose(c, err)
@@ -109,17 +95,21 @@ func (s *sshClient) connect(ctx context.Context, cDialer C.Dialer, addr string) 
 	return client, nil
 }
 
-func (s *sshClient) Close() error {
+// ProxyInfo implements C.ProxyAdapter
+func (s *Ssh) ProxyInfo() C.ProxyInfo {
+	info := s.Base.ProxyInfo()
+	info.DialerProxy = s.option.DialerProxy
+	return info
+}
+
+// Close implements C.ProxyAdapter
+func (s *Ssh) Close() error {
 	s.cMutex.Lock()
 	defer s.cMutex.Unlock()
 	if s.client != nil {
 		return s.client.Close()
 	}
 	return nil
-}
-
-func closeSsh(s *Ssh) {
-	_ = s.client.Close()
 }
 
 func NewSsh(option SshOption) (*Ssh, error) {
@@ -137,7 +127,11 @@ func NewSsh(option SshOption) (*Ssh, error) {
 		if strings.Contains(option.PrivateKey, "PRIVATE KEY") {
 			b = []byte(option.PrivateKey)
 		} else {
-			b, err = os.ReadFile(C.Path.Resolve(option.PrivateKey))
+			path := C.Path.Resolve(option.PrivateKey)
+			if !C.Path.IsSafePath(path) {
+				return nil, C.Path.ErrNotSafePath(path)
+			}
+			b, err = os.ReadFile(path)
 			if err != nil {
 				return nil, err
 			}
@@ -188,21 +182,21 @@ func NewSsh(option SshOption) (*Ssh, error) {
 	config.ClientVersion = version
 
 	outbound := &Ssh{
-		Base: &Base{
-			name:   option.Name,
-			addr:   addr,
-			tp:     C.Ssh,
-			udp:    false,
-			iface:  option.Interface,
-			rmark:  option.RoutingMark,
-			prefer: C.NewDNSPrefer(option.IPVersion),
-		},
+		Base: NewBase(BaseOption{
+			Name:         option.Name,
+			Addr:         addr,
+			Type:         C.Ssh,
+			ProviderName: option.ProviderName,
+			UDP:          false,
+			TFO:          option.TFO,
+			MPTCP:        option.MPTCP,
+			Interface:    option.Interface,
+			RoutingMark:  option.RoutingMark,
+			Prefer:       option.IPVersion,
+		}),
 		option: &option,
-		client: &sshClient{
-			config: &config,
-		},
+		config: &config,
 	}
-	runtime.SetFinalizer(outbound, closeSsh)
-
+	outbound.dialer = option.NewDialer(outbound.DialOptions())
 	return outbound, nil
 }

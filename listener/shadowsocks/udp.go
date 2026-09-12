@@ -1,6 +1,7 @@
 package shadowsocks
 
 import (
+	"context"
 	"net"
 
 	"github.com/metacubex/mihomo/adapter/inbound"
@@ -17,14 +18,13 @@ type UDPListener struct {
 	closed     bool
 }
 
-func NewUDP(addr string, pickCipher core.Cipher, tunnel C.Tunnel) (*UDPListener, error) {
-	l, err := net.ListenPacket("udp", addr)
+func NewUDP(addr string, lc C.InboundListenConfig, pickCipher core.Cipher, tunnel C.Tunnel, additions ...inbound.Addition) (*UDPListener, error) {
+	l, err := lc.ListenPacket(context.Background(), "udp", addr)
 	if err != nil {
 		return nil, err
 	}
 
-	err = sockopt.UDPReuseaddr(l.(*net.UDPConn))
-	if err != nil {
+	if err := sockopt.UDPReuseaddr(l); err != nil {
 		log.Warnln("Failed to Reuse UDP Address: %s", err)
 	}
 
@@ -42,7 +42,7 @@ func NewUDP(addr string, pickCipher core.Cipher, tunnel C.Tunnel) (*UDPListener,
 				}
 				continue
 			}
-			handleSocksUDP(conn, tunnel, data, put, remoteAddr)
+			handleSocksUDP(conn, tunnel, data, put, remoteAddr, additions...)
 		}
 	}()
 

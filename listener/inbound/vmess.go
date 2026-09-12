@@ -1,6 +1,8 @@
 package inbound
 
 import (
+	"strings"
+
 	C "github.com/metacubex/mihomo/constant"
 	LC "github.com/metacubex/mihomo/listener/config"
 	"github.com/metacubex/mihomo/listener/sing_vmess"
@@ -9,17 +11,28 @@ import (
 
 type VmessOption struct {
 	BaseOption
-	Users       []VmessUser `inbound:"users"`
-	WsPath      string      `inbound:"ws-path,omitempty"`
-	Certificate string      `inbound:"certificate,omitempty"`
-	PrivateKey  string      `inbound:"private-key,omitempty"`
-	MuxOption   MuxOption   `inbound:"mux-option,omitempty"`
+	Users           []VmessUser     `inbound:"users"`
+	WsPath          string          `inbound:"ws-path,omitempty"`
+	GrpcServiceName string          `inbound:"grpc-service-name,omitempty"`
+	Certificate     string          `inbound:"certificate,omitempty"`
+	PrivateKey      string          `inbound:"private-key,omitempty"`
+	ClientAuthType  string          `inbound:"client-auth-type,omitempty"`
+	ClientAuthCert  string          `inbound:"client-auth-cert,omitempty"`
+	EchKey          string          `inbound:"ech-key,omitempty"`
+	ShadowTLS       ShadowTLS       `inbound:"shadow-tls,omitempty"`
+	ResTLS          ResTLS          `inbound:"res-tls,omitempty"`
+	JLSConfig       JLSConfig       `inbound:"jls-config,omitempty"`
+	RealityConfig   RealityConfig   `inbound:"reality-config,omitempty"`
+	TLSMirrorConfig TLSMirrorConfig `inbound:"tlsmirror-config,omitempty"`
+	MekyaConfig     MekyaConfig     `inbound:"mekya-config,omitempty"`
+	MKCPConfig      MKCPConfig      `inbound:"mkcp-config,omitempty"`
+	MuxOption       MuxOption       `inbound:"mux-option,omitempty"`
 }
 
 type VmessUser struct {
 	Username string `inbound:"username,omitempty"`
 	UUID     string `inbound:"uuid"`
-	AlterID  int    `inbound:"alterId"`
+	AlterID  int    `inbound:"alterId,omitempty"`
 }
 
 func (o VmessOption) Equal(config C.InboundConfig) bool {
@@ -50,13 +63,24 @@ func NewVmess(options *VmessOption) (*Vmess, error) {
 		Base:   base,
 		config: options,
 		vs: LC.VmessServer{
-			Enable:      true,
-			Listen:      base.RawAddress(),
-			Users:       users,
-			WsPath:      options.WsPath,
-			Certificate: options.Certificate,
-			PrivateKey:  options.PrivateKey,
-			MuxOption:   options.MuxOption.Build(),
+			Enable:          true,
+			Listen:          base.RawAddress(),
+			Users:           users,
+			WsPath:          options.WsPath,
+			GrpcServiceName: options.GrpcServiceName,
+			Certificate:     options.Certificate,
+			PrivateKey:      options.PrivateKey,
+			ClientAuthType:  options.ClientAuthType,
+			ClientAuthCert:  options.ClientAuthCert,
+			EchKey:          options.EchKey,
+			ShadowTLS:       options.ShadowTLS.Build(),
+			ResTLS:          options.ResTLS.Build(),
+			JLSConfig:       options.JLSConfig.Build(),
+			RealityConfig:   options.RealityConfig.Build(),
+			TLSMirrorConfig: options.TLSMirrorConfig.Build(),
+			MekyaConfig:     options.MekyaConfig.Build(),
+			MKCPConfig:      options.MKCPConfig.Build(),
+			MuxOption:       options.MuxOption.Build(),
 		},
 	}, nil
 }
@@ -68,26 +92,19 @@ func (v *Vmess) Config() C.InboundConfig {
 
 // Address implements constant.InboundListener
 func (v *Vmess) Address() string {
+	var addrList []string
 	if v.l != nil {
 		for _, addr := range v.l.AddrList() {
-			return addr.String()
+			addrList = append(addrList, addr.String())
 		}
 	}
-	return ""
+	return strings.Join(addrList, ",")
 }
 
 // Listen implements constant.InboundListener
 func (v *Vmess) Listen(tunnel C.Tunnel) error {
 	var err error
-	users := make([]LC.VmessUser, len(v.config.Users))
-	for i, v := range v.config.Users {
-		users[i] = LC.VmessUser{
-			Username: v.Username,
-			UUID:     v.UUID,
-			AlterID:  v.AlterID,
-		}
-	}
-	v.l, err = sing_vmess.New(v.vs, tunnel, v.Additions()...)
+	v.l, err = sing_vmess.New(v.vs, v.ListenConfig(), tunnel, v.Additions()...)
 	if err != nil {
 		return err
 	}

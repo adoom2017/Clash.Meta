@@ -3,7 +3,7 @@ package utils
 import (
 	"errors"
 	"fmt"
-	"strconv"
+	"sort"
 	"strings"
 
 	"golang.org/x/exp/constraints"
@@ -37,39 +37,14 @@ func newIntRangesFromList[T constraints.Integer](list []string, parseFn func(str
 			continue
 		}
 
-		status := strings.Split(s, "-")
-		statusLen := len(status)
-		if statusLen > 2 {
-			return nil, errIntRanges
-		}
-
-		start, err := parseFn(strings.Trim(status[0], "[ ]"))
+		r, err := newIntRange[T](s, parseFn)
 		if err != nil {
-			return nil, errIntRanges
+			return nil, err
 		}
-
-		switch statusLen {
-		case 1: // Port range
-			ranges = append(ranges, NewRange(T(start), T(start)))
-		case 2: // Single port
-			end, err := parseFn(strings.Trim(status[1], "[ ]"))
-			if err != nil {
-				return nil, errIntRanges
-			}
-
-			ranges = append(ranges, NewRange(T(start), T(end)))
-		}
+		ranges = append(ranges, r)
 	}
 
 	return ranges, nil
-}
-
-func parseUnsigned[T constraints.Unsigned](s string) (T, error) {
-	if val, err := strconv.ParseUint(s, 10, 64); err == nil {
-		return T(val), nil
-	} else {
-		return 0, err
-	}
 }
 
 func NewUnsignedRanges[T constraints.Unsigned](expected string) (IntRanges[T], error) {
@@ -78,14 +53,6 @@ func NewUnsignedRanges[T constraints.Unsigned](expected string) (IntRanges[T], e
 
 func NewUnsignedRangesFromList[T constraints.Unsigned](list []string) (IntRanges[T], error) {
 	return newIntRangesFromList(list, parseUnsigned[T])
-}
-
-func parseSigned[T constraints.Signed](s string) (T, error) {
-	if val, err := strconv.ParseInt(s, 10, 64); err == nil {
-		return T(val), nil
-	} else {
-		return 0, err
-	}
 }
 
 func NewSignedRanges[T constraints.Signed](expected string) (IntRanges[T], error) {
@@ -117,17 +84,7 @@ func (ranges IntRanges[T]) String() string {
 
 	terms := make([]string, len(ranges))
 	for i, r := range ranges {
-		start := r.Start()
-		end := r.End()
-
-		var term string
-		if start == end {
-			term = strconv.Itoa(int(start))
-		} else {
-			term = strconv.Itoa(int(start)) + "-" + strconv.Itoa(int(end))
-		}
-
-		terms[i] = term
+		terms[i] = r.String()
 	}
 
 	return strings.Join(terms, "/")
@@ -139,10 +96,34 @@ func (ranges IntRanges[T]) Range(f func(t T) bool) {
 	}
 
 	for _, r := range ranges {
-		for i := r.Start(); i <= r.End(); i++ {
+		for i := r.Start(); i <= r.End() && i >= r.Start(); i++ {
 			if !f(i) {
 				return
 			}
+			if i+1 < i { // integer overflow
+				break
+			}
 		}
 	}
+}
+
+func (ranges IntRanges[T]) Merge() (mergedRanges IntRanges[T]) {
+	if len(ranges) == 0 {
+		return
+	}
+	sort.Slice(ranges, func(i, j int) bool {
+		return ranges[i].Start() < ranges[j].Start()
+	})
+	mergedRanges = ranges[:1]
+	var rangeIndex int
+	for _, r := range ranges[1:] {
+		if mergedRanges[rangeIndex].End()+1 > mergedRanges[rangeIndex].End() && // integer overflow
+			r.Start() > mergedRanges[rangeIndex].End()+1 {
+			mergedRanges = append(mergedRanges, r)
+			rangeIndex++
+		} else if r.End() > mergedRanges[rangeIndex].End() {
+			mergedRanges[rangeIndex].end = r.End()
+		}
+	}
+	return
 }

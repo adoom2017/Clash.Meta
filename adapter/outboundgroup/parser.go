@@ -7,12 +7,12 @@ import (
 
 	"github.com/dlclark/regexp2"
 
-	"github.com/metacubex/mihomo/adapter/outbound"
 	"github.com/metacubex/mihomo/adapter/provider"
 	"github.com/metacubex/mihomo/common/structure"
 	"github.com/metacubex/mihomo/common/utils"
 	C "github.com/metacubex/mihomo/constant"
-	types "github.com/metacubex/mihomo/constant/provider"
+	P "github.com/metacubex/mihomo/constant/provider"
+	"github.com/metacubex/mihomo/log"
 )
 
 var (
@@ -23,7 +23,6 @@ var (
 )
 
 type GroupCommonOption struct {
-	outbound.BasicOption
 	Name                string   `group:"name"`
 	Type                string   `group:"type"`
 	Proxies             []string `group:"proxies,omitempty"`
@@ -32,6 +31,7 @@ type GroupCommonOption struct {
 	Interval            int      `group:"interval,omitempty"`
 	TestTimeout         int      `group:"timeout,omitempty"`
 	MaxFailedTimes      int      `group:"max-failed-times,omitempty"`
+	EmptyFallback       string   `group:"empty-fallback,omitempty"`
 	Lazy                bool     `group:"lazy,omitempty"`
 	DisableUDP          bool     `group:"disable-udp,omitempty"`
 	Filter              string   `group:"filter,omitempty"`
@@ -45,13 +45,13 @@ type GroupCommonOption struct {
 	Icon                string   `group:"icon,omitempty"`
 }
 
-func ParseProxyGroup(config map[string]any, proxyMap map[string]C.Proxy, providersMap map[string]types.ProxyProvider, AllProxies []string, AllProviders []string) (C.ProxyAdapter, error) {
+func ParseProxyGroup(config map[string]any, proxyMap map[string]C.Proxy, providersMap map[string]P.ProxyProvider, AllProxies []string, AllProviders []string) (ProxyGroup, error) {
 	decoder := structure.NewDecoder(structure.Option{TagName: "group", WeaklyTypedInput: true})
 
-	groupOption := &GroupCommonOption{
+	groupOption := GroupCommonOption{
 		Lazy: true,
 	}
-	if err := decoder.Decode(config, groupOption); err != nil {
+	if err := decoder.Decode(config, &groupOption); err != nil {
 		return nil, errFormat
 	}
 
@@ -59,9 +59,30 @@ func ParseProxyGroup(config map[string]any, proxyMap map[string]C.Proxy, provide
 		return nil, errFormat
 	}
 
+	if _, ok := config["routing-mark"]; ok {
+		log.Errorln("The group [%s] with routing-mark configuration was removed, please set it directly on the proxy instead", groupOption.Name)
+	}
+	if _, ok := config["interface-name"]; ok {
+		log.Errorln("The group [%s] with interface-name configuration was removed, please set it directly on the proxy instead", groupOption.Name)
+	}
+	if _, ok := config["dialer-proxy"]; ok {
+		log.Errorln("The group [%s] with dialer-proxy configuration is not allowed, please set it directly on the proxy instead", groupOption.Name)
+	}
+
 	groupName := groupOption.Name
 
-	providers := []types.ProxyProvider{}
+	if groupOption.EmptyFallback == "" {
+		groupOption.EmptyFallback = "COMPATIBLE"
+	}
+	emptyFallback, ok := proxyMap[groupOption.EmptyFallback]
+	if !ok {
+		return nil, fmt.Errorf("%s: empty fallback proxy '%s' not found", groupName, groupOption.EmptyFallback)
+	}
+	if _, ok := emptyFallback.Adapter().(ProxyGroup); ok { // strictly forbidden to fill in a proxy group for empty-fallback
+		return nil, fmt.Errorf("%s: empty fallback proxy '%s' not found", groupName, groupOption.EmptyFallback)
+	}
+
+	providers := []P.ProxyProvider{}
 
 	if groupOption.IncludeAll {
 		groupOption.IncludeAllProviders = true
@@ -69,7 +90,7 @@ func ParseProxyGroup(config map[string]any, proxyMap map[string]C.Proxy, provide
 	}
 
 	if groupOption.IncludeAllProviders {
-		groupOption.Use = append(groupOption.Use, AllProviders...)
+		groupOption.Use = AllProviders
 	}
 	if groupOption.IncludeAllProxies {
 		if groupOption.Filter != "" {
@@ -87,6 +108,9 @@ func ParseProxyGroup(config map[string]any, proxyMap map[string]C.Proxy, provide
 			}
 		} else {
 			groupOption.Proxies = append(groupOption.Proxies, AllProxies...)
+		}
+		if len(groupOption.Proxies) == 0 && len(groupOption.Use) == 0 {
+			groupOption.Proxies = []string{groupOption.EmptyFallback}
 		}
 	}
 
@@ -156,29 +180,44 @@ func ParseProxyGroup(config map[string]any, proxyMap map[string]C.Proxy, provide
 			return nil, fmt.Errorf("%s: %w", groupName, err)
 		}
 
-		providers = append([]types.ProxyProvider{pd}, providers...)
+		providers = append([]P.ProxyProvider{pd}, providers...)
 		providersMap[groupName] = pd
 	}
 
-	var group C.ProxyAdapter
 	switch groupOption.Type {
 	case "url-test":
-		opts := parseURLTestOption(config)
-		group = NewURLTest(groupOption, providers, opts...)
+		opt := URLTestOption{}
+		err = decoder.Decode(config, &opt)
+		if err != nil {
+			return nil, err
+		}
+		return NewURLTest(groupOption, opt, emptyFallback, providers)
 	case "select":
-		group = NewSelector(groupOption, providers)
+		opt := SelectorOption{}
+		err = decoder.Decode(config, &opt)
+		if err != nil {
+			return nil, err
+		}
+		return NewSelector(groupOption, opt, emptyFallback, providers)
 	case "fallback":
-		group = NewFallback(groupOption, providers)
+		opt := FallbackOption{}
+		err = decoder.Decode(config, &opt)
+		if err != nil {
+			return nil, err
+		}
+		return NewFallback(groupOption, opt, emptyFallback, providers)
 	case "load-balance":
-		strategy := parseStrategy(config)
-		return NewLoadBalance(groupOption, providers, strategy)
+		opt := LoadBalanceOption{}
+		err = decoder.Decode(config, &opt)
+		if err != nil {
+			return nil, err
+		}
+		return NewLoadBalance(groupOption, opt, emptyFallback, providers)
 	case "relay":
-		group = NewRelay(groupOption, providers)
+		return nil, fmt.Errorf("%w: The group [%s] with relay type was removed, please using dialer-proxy instead", errType, groupName)
 	default:
 		return nil, fmt.Errorf("%w: %s", errType, groupOption.Type)
 	}
-
-	return group, nil
 }
 
 func getProxies(mapping map[string]C.Proxy, list []string) ([]C.Proxy, error) {
@@ -193,15 +232,15 @@ func getProxies(mapping map[string]C.Proxy, list []string) ([]C.Proxy, error) {
 	return ps, nil
 }
 
-func getProviders(mapping map[string]types.ProxyProvider, list []string) ([]types.ProxyProvider, error) {
-	var ps []types.ProxyProvider
+func getProviders(mapping map[string]P.ProxyProvider, list []string) ([]P.ProxyProvider, error) {
+	var ps []P.ProxyProvider
 	for _, name := range list {
 		p, ok := mapping[name]
 		if !ok {
 			return nil, fmt.Errorf("'%s' not found", name)
 		}
 
-		if p.VehicleType() == types.Compatible {
+		if p.VehicleType() == P.Compatible {
 			return nil, fmt.Errorf("proxy group %s can't contains in `use`", name)
 		}
 		ps = append(ps, p)
@@ -209,7 +248,7 @@ func getProviders(mapping map[string]types.ProxyProvider, list []string) ([]type
 	return ps, nil
 }
 
-func addTestUrlToProviders(providers []types.ProxyProvider, url string, expectedStatus utils.IntRanges[uint16], filter string, interval uint) {
+func addTestUrlToProviders(providers []P.ProxyProvider, url string, expectedStatus utils.IntRanges[uint16], filter string, interval uint) {
 	if len(providers) == 0 || len(url) == 0 {
 		return
 	}

@@ -7,7 +7,7 @@ import (
 )
 
 type DomainRegex struct {
-	*Base
+	Base
 	regex   *regexp2.Regexp
 	adapter string
 }
@@ -16,7 +16,7 @@ func (dr *DomainRegex) RuleType() C.RuleType {
 	return C.DomainRegex
 }
 
-func (dr *DomainRegex) Match(metadata *C.Metadata) (bool, string) {
+func (dr *DomainRegex) Match(metadata *C.Metadata, helper C.RuleMatchHelper) (bool, string) {
 	domain := metadata.RuleHost()
 	match, _ := dr.regex.MatchString(domain)
 	return match, dr.adapter
@@ -36,10 +36,10 @@ func NewDomainRegex(regex string, adapter string) (*DomainRegex, error) {
 		return nil, err
 	}
 	return &DomainRegex{
-		Base:    &Base{},
+		Base:    Base{},
 		regex:   r,
 		adapter: adapter,
 	}, nil
 }
 
-//var _ C.Rule = (*DomainRegex)(nil)
+var _ C.Rule = (*DomainRegex)(nil)
