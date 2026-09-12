@@ -220,6 +220,41 @@ async fn read_http_header(stream: &mut tokio::net::TcpStream) -> Vec<u8> {
 }
 
 #[tokio::test]
+async fn ipv6_http_forwarding_and_probe_preserve_authority() {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        let origin = tokio::net::TcpListener::bind("[::1]:0").await.unwrap();
+        let address = origin.local_addr().unwrap();
+        let oracle = tokio::spawn(async move {
+            for path in ["/inspect?q=1", "/probe"] {
+                let (mut stream, _) = origin.accept().await.unwrap();
+                let request = String::from_utf8(read_http_header(&mut stream).await).unwrap();
+                assert!(request.starts_with(&format!("GET {path} HTTP/1.1\r\n")));
+                assert!(request.contains(&format!("\r\nHost: {address}\r\n")));
+                assert!(!request.to_lowercase().contains("proxy-authorization"));
+                stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok").await.unwrap();
+            }
+        });
+        let port = free_port();
+        let config = Config {
+            ipv6: true,
+            mixed_port: port,
+            ..Config::default()
+        };
+        let core = Core::new(config, Arc::new(meta_platform::DefaultHooks)).unwrap();
+        let running = core.start().await.unwrap();
+        let mut client = tokio::net::TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+        client.write_all(format!("GET http://{address}/inspect?q=1 HTTP/1.1\r\nHost: wrong.test\r\nProxy-Authorization: Basic ignored\r\n\r\n").as_bytes()).await.unwrap();
+        let mut response = vec![];
+        client.read_to_end(&mut response).await.unwrap();
+        assert!(response.starts_with(b"HTTP/1.1 200 OK"));
+        assert!(response.ends_with(b"\r\n\r\nok"));
+        core.probe("DIRECT", &format!("http://{address}/probe"), Duration::from_secs(3)).await.unwrap();
+        oracle.await.unwrap();
+        running.shutdown().await;
+    }).await.unwrap();
+}
+
+#[tokio::test]
 async fn mixed_socks_and_http_connect_use_vless_and_restore_fake_ip() {
     tokio::time::timeout(Duration::from_secs(10), async {
         for socks in [false, true] {

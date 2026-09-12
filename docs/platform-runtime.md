@@ -12,8 +12,11 @@ Limits: 512 TCP flows, 512 UDP flows, 256 UDP destination sockets, 256 packets p
 device queue, 32 KiB per TCP stack buffer, four 8 KiB chunks per TCP direction,
 16 datagrams per UDP flow, 30-second incomplete TCP handshake limit, 300-second
 TCP idle limit and 120-second UDP idle limit. IPv4 fragment/reassembly buffers
-are 65,536 bytes. IPv6 extension headers are inspected using smoltcp parsers;
-IPv6 fragmented UDP beyond the MTU is not covered by the current acceptance tests.
+are 65,536 bytes. The IPv6 adapter uses smoltcp wire parsers and its range assembler
+for 64 concurrent reassemblies, a 65,535-byte packet limit and 30-second expiry
+(approximately 4 MiB total). Overlapping fragments invalidate the whole datagram;
+atomic fragments remain independent. Generated oversized IPv6 UDP replies are
+fragmented to the configured MTU. IPv6 extension chains are bounded to eight.
 
 ## Desktop
 
@@ -69,7 +72,8 @@ Errors are thread-local UTF-8 text from `meta_error_v1`.
 iOS hosts feed NetworkExtension packets through the bounded read/write functions
 and receive packet-ready notifications. Android hosts must supply socket protect;
 they may use the same packet queue or call `meta_set_tun_fd_v1` before start.
-The fd is duplicated; the host retains the original. Hosts manage VPN permission,
+The fd is duplicated; the host retains the original. Packet queue calls return an
+explicit error after fd mode is selected. Hosts manage VPN permission,
 routes, DNS and application lifecycle. `meta_network_changed_v1` invalidates
 connections and DNS cache after a host network change. Callbacks must return
 promptly and may not reenter lifecycle functions; their context must remain valid
@@ -80,15 +84,17 @@ until stop/destroy returns. These are integration interfaces, not mobile apps.
 2026-09-12/13, Windows x64 and Ubuntu 22.04 WSL:
 
 - Simulated IP devices: 128 KiB TCP round trips and half-close on IPv4/IPv6;
-  4,000-byte fragmented IPv4 UDP and 1,200-byte IPv6 UDP; DNS/fake-IP hijack.
-- A real Linux TUN test routed an isolated `198.19.254.253/32` through VLESS
-  TCP/UDP and verified removal of the test route. It caught a partially-read
+  4,000-byte fragmented IPv4/IPv6 UDP; DNS/fake-IP hijack. IPv6 regression covers
+  out-of-order data, wire headers, overlaps, expiry, truncation and queue limits.
+- A real Linux TUN test routed isolated `198.19.254.253/32` and
+  `fdfe:dcba:9877::fd/128` through VLESS TCP and 4,000-byte UDP, and verified route
+  removal. The original IPv4 case caught a partially-read
   VLESS UDP cancellation issue; a deterministic regression now covers the fix.
 - Route fault injection verifies recovery after partial initialization, journal
   persistence, exclusive ownership and preservation of unrelated routes.
 - Simulated C host tests cover live ICMP packets, buffer retries, notification
   reentry rejection, no callbacks after stop and independent checked handles.
-- Android arm64 builds static and dynamic FFI libraries with Rust 1.93.1, NDK
+- Android arm64 builds release static and dynamic FFI libraries with Rust 1.93.1, NDK
   27.0.12077973 and API 24. `scripts/check-mobile.ps1` reproduces the build.
 - iOS build attempted on Windows but blocked at ring's C compilation: Xcode
   `xcrun` and iPhoneOS SDK are unavailable. Run the iOS script on a Mac with Xcode.

@@ -1,4 +1,6 @@
 //! Raw IP to proxy-session adapter. smoltcp owns TCP/IP protocol state.
+#[path = "packet_ipv6.rs"]
+mod ipv6;
 use crate::Core;
 use anyhow::{Result, ensure};
 use meta_platform::PacketIo;
@@ -324,9 +326,18 @@ pub(crate) async fn run(core: Arc<Core>, io: Arc<dyn PacketIo>) -> Result<()> {
     let now = || NetInstant::from_millis(started.elapsed().as_millis() as i64);
     let (transmit, mut outgoing) = mpsc::channel::<Vec<u8>>(256);
     let writer_io = io.clone();
+    let mtu = core.config.tun.mtu as usize;
     let mut writer = AbortOnDropHandle::new(tokio::spawn(async move {
+        let mut ident = uuid::Uuid::new_v4().as_u128() as u32;
         while let Some(packet) = outgoing.recv().await {
-            tokio::time::timeout(Duration::from_secs(5), writer_io.send(&packet)).await??;
+            ident = ident.wrapping_add(1);
+            let send = async {
+                for frame in ipv6::fragment(packet, mtu, ident)? {
+                    writer_io.send(&frame).await?;
+                }
+                Ok::<(), anyhow::Error>(())
+            };
+            tokio::time::timeout(Duration::from_secs(5), send).await??;
         }
         Ok::<(), anyhow::Error>(())
     }));
@@ -360,6 +371,8 @@ pub(crate) async fn run(core: Arc<Core>, io: Arc<dyn PacketIo>) -> Result<()> {
     let mut tick = tokio::time::interval(Duration::from_millis(2));
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut packet = vec![0; 65535];
+    let mut fragments = ipv6::Reassembly::default();
+    let mut last_expiry = Instant::now();
     loop {
         tokio::select! {
             biased;
@@ -369,7 +382,9 @@ pub(crate) async fn run(core: Arc<Core>, io: Arc<dyn PacketIo>) -> Result<()> {
                 let n = result?;
                 ensure!(n <= packet.len(), "PacketIo returned invalid length");
                 if n == 0 { continue; }
-                if let Some((flow, syn)) = sniff(&packet[..n]) {
+                if !core.config.ipv6 && packet[0] >> 4 == 6 { continue; }
+                let Some(packet) = fragments.accept(&packet[..n], Instant::now()) else { continue; };
+                if let Some((flow, syn)) = sniff(&packet) {
                     if !core.config.ipv6 && matches!(flow.target.addr, IpAddress::Ipv6(_)) { continue; }
                     if flow.tcp && syn && !tcp_flows.contains_key(&flow) && tcp_flows.len() < MAX_TCP {
                         let mut socket = tcp::Socket::new(tcp::SocketBuffer::new(vec![0; BUFFER]), tcp::SocketBuffer::new(vec![0; BUFFER]));
@@ -390,9 +405,13 @@ pub(crate) async fn run(core: Arc<Core>, io: Arc<dyn PacketIo>) -> Result<()> {
                         ports.insert(flow.target, UdpPort { handle: sockets.add(socket), last: Instant::now() });
                     }
                 }
-                device.incoming.push_back(packet[..n].to_vec());
+                device.incoming.push_back(packet.into_owned());
             },
             _ = tick.tick() => {},
+        }
+        if last_expiry.elapsed() >= Duration::from_secs(1) {
+            last_expiry = Instant::now();
+            fragments.expire(last_expiry);
         }
         iface.poll(now(), &mut device, &mut sockets);
         while let Some(result) = tasks.try_join_next() {

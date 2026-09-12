@@ -241,8 +241,7 @@ impl Resolver {
         if server.starts_with("https://") {
             use http_body_util::{BodyExt, Full, Limited};
             let uri: http::Uri = server.parse()?;
-            let host = uri.host().context("DoH host missing")?;
-            let target = Target::parse(&format!("{host}:{}", uri.port_u16().unwrap_or(443)))?;
+            let target = Target::from_uri(&uri, 443)?;
             let addr = self.bootstrap(&target.host, target.port).await?;
             let socket = meta_platform::tcp_connect(addr, &*self.hooks).await?;
             let config = meta_protocol::tls::config(&["http/1.1".into()], false)?;

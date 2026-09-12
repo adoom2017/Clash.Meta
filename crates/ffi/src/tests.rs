@@ -60,6 +60,19 @@ fn checked_handles_independent_runtimes_and_caller_buffers() {
         ERROR
     );
     assert_eq!(id, 0);
+    let short_hooks: u32 = 4;
+    assert_eq!(
+        unsafe {
+            meta_create_v1(
+                b"{}".as_ptr(),
+                2,
+                (&short_hooks as *const u32).cast(),
+                &mut id,
+            )
+        },
+        ERROR
+    );
+    assert_eq!(id, 0);
 }
 
 struct Callbacks {
@@ -69,6 +82,12 @@ struct Callbacks {
 unsafe extern "C" fn ready(context: *mut c_void) {
     let context = unsafe { &*(context as *const Callbacks) };
     assert_eq!(meta_stop_v1(context.id.load(Ordering::Relaxed)), ERROR);
+    let mut nested = 99;
+    assert_eq!(
+        unsafe { meta_create_v1(b"{}".as_ptr(), 2, std::ptr::null(), &mut nested) },
+        ERROR
+    );
+    assert_eq!(nested, 0);
     context.notifications.fetch_add(1, Ordering::Relaxed);
 }
 #[test]

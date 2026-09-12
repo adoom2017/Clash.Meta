@@ -88,8 +88,9 @@ pub extern "C" fn meta_abi_version_v1() -> u32 {
 }
 
 /// # Safety
-/// Inputs must be readable; hooks/output must be aligned valid objects. Callback
-/// context must stay live until stop/destroy returns. The handle output is writable.
+/// Inputs and the hooks size field must be readable and aligned. If the size is
+/// supported, hooks must point to a complete valid MetaHooksV1. Callback context
+/// must stay live until stop/destroy returns. The handle output is writable.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn meta_create_v1(
     data: *const u8,
@@ -102,10 +103,16 @@ pub unsafe extern "C" fn meta_create_v1(
         unsafe {
             *out = 0;
         }
+        host::check_lifecycle()?;
         let config = meta_config::Config::parse(unsafe { input(data, len)? })?;
         let hooks = if hooks.is_null() {
             HostHooks::default()
         } else {
+            let size = unsafe { std::ptr::addr_of!((*hooks).size).read() };
+            ensure!(
+                size as usize == std::mem::size_of::<MetaHooksV1>(),
+                "unsupported host hooks size"
+            );
             HostHooks::new(unsafe { *hooks })?
         };
         let mut registry = handles().lock().unwrap();
@@ -251,6 +258,7 @@ pub unsafe extern "C" fn meta_write_packet_v1(id: u64, data: *const u8, len: usi
         ensure!(matches!(packet[0] >> 4, 4 | 6), "invalid IP version");
         let handle = handle(id)?;
         ensure!(!handle.core.stop.is_cancelled(), "core is stopped");
+        handle.check_packet_queue()?;
         let input = handle.packet_input.as_ref().context("TUN is disabled")?;
         match input.try_send(packet.to_vec()) {
             Ok(()) => Ok(OK),
@@ -275,7 +283,7 @@ pub unsafe extern "C" fn meta_read_packet_v1(
             *length = 0;
         }
         let handle = handle(id)?;
-        ensure!(handle.packet_input.is_some(), "TUN is disabled");
+        handle.check_packet_queue()?;
         let mut queue = handle.packet_output.lock().unwrap();
         if queue.pending.is_none() {
             match queue.receiver.try_recv() {

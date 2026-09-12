@@ -5,7 +5,10 @@ use meta_platform::{PacketIo, PlatformHooks};
 use std::{
     cell::Cell,
     ffi::c_void,
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
     thread::JoinHandle,
     time::Duration,
 };
@@ -42,6 +45,13 @@ impl HostHooks {
     }
 }
 thread_local! { static CALLBACK: Cell<bool> = const { Cell::new(false) }; }
+pub(crate) fn check_lifecycle() -> Result<()> {
+    ensure!(
+        !CALLBACK.with(Cell::get),
+        "lifecycle calls cannot reenter from host callbacks"
+    );
+    Ok(())
+}
 struct Scope(bool);
 impl Scope {
     fn enter() -> Self {
@@ -127,6 +137,7 @@ pub(crate) struct Handle {
     worker: Mutex<Option<JoinHandle<()>>>,
     pub(crate) packet_input: Option<mpsc::Sender<Vec<u8>>>,
     pub(crate) packet_output: Mutex<PacketsOut>,
+    packet_queue_enabled: Arc<AtomicBool>,
 }
 impl Handle {
     pub(crate) fn new(id: u64, config: meta_config::Config, hooks: HostHooks) -> Result<Self> {
@@ -144,6 +155,9 @@ impl Handle {
         let (input_sender, input_receiver) = mpsc::channel(256);
         let (output_sender, output_receiver) = mpsc::channel(256);
         let packet_input = core.config.tun.enable.then_some(input_sender);
+        let packet_queue_enabled = Arc::new(AtomicBool::new(core.config.tun.enable));
+        #[cfg(target_os = "android")]
+        let queue_enabled = packet_queue_enabled.clone();
         let packets = core.config.tun.enable.then(|| {
             Arc::new(HostPackets {
                 input: tokio::sync::Mutex::new(input_receiver),
@@ -181,7 +195,11 @@ impl Handle {
                                     Err("TUN fd must be set before start with tun.enable=true".into())
                                 } else {
                                     match meta_platform::native::NativeTun::from_owned_fd(fd) {
-                                        Ok(device) => { packets = Some(Arc::new(device)); Ok(()) },
+                                        Ok(device) => {
+                                            queue_enabled.store(false, Ordering::Release);
+                                            packets = Some(Arc::new(device));
+                                            Ok(())
+                                        },
                                         Err(error) => Err(format!("{error:#}")),
                                     }
                                 };
@@ -201,6 +219,7 @@ impl Handle {
             commands,
             worker: Mutex::new(Some(worker)),
             packet_input,
+            packet_queue_enabled,
             packet_output: Mutex::new(PacketsOut {
                 receiver: output_receiver,
                 pending: None,
@@ -209,6 +228,13 @@ impl Handle {
     }
     pub(crate) fn start(&self) -> Result<()> {
         self.command(Command::Start)
+    }
+    pub(crate) fn check_packet_queue(&self) -> Result<()> {
+        ensure!(
+            self.packet_queue_enabled.load(Ordering::Acquire),
+            "host packet queue unavailable: TUN is disabled or uses an Android fd"
+        );
+        Ok(())
     }
     pub(crate) fn network_changed(&self) -> Result<()> {
         self.command(Command::NetworkChanged)
@@ -221,10 +247,7 @@ impl Handle {
         &self,
         make: impl FnOnce(std::sync::mpsc::SyncSender<Result<(), String>>) -> Command,
     ) -> Result<()> {
-        ensure!(
-            !CALLBACK.with(Cell::get),
-            "lifecycle calls cannot reenter from host callbacks"
-        );
+        check_lifecycle()?;
         ensure!(!self.core.stop.is_cancelled(), "core is stopped");
         let (reply, result) = std::sync::mpsc::sync_channel(1);
         self.commands
@@ -239,10 +262,7 @@ impl Handle {
         }
     }
     pub(crate) fn shutdown(&self) -> Result<()> {
-        ensure!(
-            !CALLBACK.with(Cell::get),
-            "lifecycle calls cannot reenter from host callbacks"
-        );
+        check_lifecycle()?;
         self.core.stop.cancel();
         let mut worker = self.worker.lock().unwrap();
         if let Some(worker) = worker.take() {

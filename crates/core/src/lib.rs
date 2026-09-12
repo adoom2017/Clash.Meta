@@ -599,27 +599,19 @@ impl Core {
         let start = Instant::now();
         let operation = async {
             let uri: http::Uri = url.parse()?;
-            let host = uri.host().context("test URL missing host")?;
             let secure = uri.scheme_str() == Some("https");
             ensure!(
                 secure || uri.scheme_str() == Some("http"),
                 "test URL must use HTTP(S)"
             );
-            let (stream, _) = self
-                .dial(
-                    &Target::new(
-                        host,
-                        uri.port_u16().unwrap_or(if secure { 443 } else { 80 }),
-                    )?,
-                    Some(name),
-                )
-                .await?;
+            let target = Target::from_uri(&uri, if secure { 443 } else { 80 })?;
+            let (stream, _) = self.dial(&target, Some(name)).await?;
             let mut stream: BoxStream = if secure {
                 let cfg = meta_protocol::tls::config(&["http/1.1".into()], false)?;
                 Box::new(
                     tokio_rustls::TlsConnector::from(Arc::new(cfg))
                         .connect(
-                            rustls::pki_types::ServerName::try_from(host.to_owned())?,
+                            rustls::pki_types::ServerName::try_from(target.host.clone())?,
                             stream,
                         )
                         .await?,
@@ -630,7 +622,7 @@ impl Core {
             let path = uri.path_and_query().map(|p| p.as_str()).unwrap_or("/");
             stream
                 .write_all(
-                    format!("GET {path} HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n")
+                    format!("GET {path} HTTP/1.1\r\nHost: {target}\r\nConnection: close\r\n\r\n")
                         .as_bytes(),
                 )
                 .await?;

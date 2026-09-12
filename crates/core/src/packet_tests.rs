@@ -85,6 +85,8 @@ async fn client(packets: Arc<Packets>, target: SocketAddr, payload: Vec<u8>, tcp
     let mut result = vec![];
     let mut sent = 0;
     let mut tick = tokio::time::interval(Duration::from_millis(2));
+    let mut fragments = ipv6::Reassembly::default();
+    let mut ident = 0;
     loop {
         iface.poll(now(), &mut device, &mut sockets);
         if tcp {
@@ -125,10 +127,18 @@ async fn client(packets: Arc<Packets>, target: SocketAddr, payload: Vec<u8>, tcp
         }
         iface.poll(now(), &mut device, &mut sockets);
         while let Ok(packet) = output.try_recv() {
-            packets.send(&packet).await.unwrap();
+            ident += 1;
+            for frame in ipv6::fragment(packet, 1500, ident).unwrap() {
+                packets.send(&frame).await.unwrap();
+            }
         }
         tokio::select! {
-            n = packets.recv(&mut packet) => { let n = n.unwrap(); device.incoming.push_back(packet[..n].to_vec()); },
+            n = packets.recv(&mut packet) => {
+                let n = n.unwrap();
+                if let Some(packet) = fragments.accept(&packet[..n], Instant::now()) {
+                    device.incoming.push_back(packet.into_owned());
+                }
+            },
             _ = tick.tick() => {},
         }
     }
@@ -144,13 +154,7 @@ async fn raw_ip_tcp_udp_ipv4_ipv6_and_half_close() {
                 config.tun.enable = true;
                 let core = Core::new(config, Arc::new(meta_platform::DefaultHooks)).unwrap();
                 let running = core.start_with_packets(Some(device)).await.unwrap();
-                let payload: Vec<u8> = (0..if tcp {
-                    131072
-                } else if host == "127.0.0.1" {
-                    4000
-                } else {
-                    1200
-                })
+                let payload: Vec<u8> = (0..if tcp { 131072 } else { 4000 })
                     .map(|n| (n % 251) as u8)
                     .collect();
                 let (target, oracle) = if tcp {

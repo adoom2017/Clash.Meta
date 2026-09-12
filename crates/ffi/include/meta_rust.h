@@ -16,7 +16,8 @@ typedef struct {
     void (*packet_ready)(void *context);
 } meta_hooks_v1;
 
-/* Set size=sizeof(meta_hooks_v1), version=1. Hooks are optional except Android
+/* Set size=sizeof(meta_hooks_v1), version=1. The size field is read before the
+ * remaining fields; unsupported sizes are rejected. Hooks are optional except Android
  * requires protect_socket. A socket is borrowed, never close it. Return zero on
  * successful protection. Callbacks can run concurrently on worker threads and
  * must return promptly. Context must outlive stop/destroy. Callbacks may read
@@ -47,7 +48,7 @@ int32_t meta_close_connections_v1(meta_handle handle);
 int32_t meta_network_changed_v1(meta_handle handle);
 #ifdef __ANDROID__
 /* Before start, duplicates a configured TUN fd. The host keeps its original fd.
- * Once set, use fd packet I/O instead of meta_read/write_packet_v1. */
+ * Once set, meta_read/write_packet_v1 return META_ERROR; use fd packet I/O. */
 int32_t meta_set_tun_fd_v1(meta_handle handle, int32_t fd);
 #endif
 int32_t meta_error_v1(uint8_t *buffer, size_t capacity, size_t *length);

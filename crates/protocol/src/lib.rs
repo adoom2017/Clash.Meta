@@ -69,6 +69,16 @@ impl Target {
     pub fn ip(&self) -> Option<IpAddr> {
         self.host.parse().ok()
     }
+    pub fn from_uri(uri: &http::Uri, default_port: u16) -> Result<Self> {
+        let authority = uri
+            .authority()
+            .ok_or_else(|| anyhow::anyhow!("URL authority missing"))?;
+        if authority.port().is_some() {
+            Self::parse(authority.as_str())
+        } else {
+            Self::parse(&format!("{authority}:{default_port}"))
+        }
+    }
 }
 
 impl fmt::Display for Target {
@@ -151,5 +161,21 @@ mod target_tests {
             ])
             .is_err()
         );
+    }
+    #[test]
+    fn url_authorities_preserve_ipv6_and_reject_invalid_ports_and_userinfo() {
+        for (url, expected) in [
+            ("http://[::1]/", "[::1]:80"),
+            ("http://[a::0]:8080/", "[a::]:8080"),
+            ("http://example.test/", "example.test:80"),
+        ] {
+            assert_eq!(
+                Target::from_uri(&url.parse().unwrap(), 80).unwrap(),
+                Target::parse(expected).unwrap()
+            );
+        }
+        for url in ["http://host:65536/", "http://host:0/", "http://user@host/"] {
+            assert!(Target::from_uri(&url.parse().unwrap(), 80).is_err());
+        }
     }
 }

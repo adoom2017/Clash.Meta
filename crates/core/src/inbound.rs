@@ -264,10 +264,7 @@ async fn http_connection(core: Arc<Core>, stream: &mut TcpStream) -> Result<()> 
             uri.scheme_str() == Some("http"),
             "HTTP proxy requires absolute http URL"
         );
-        Target::new(
-            uri.host().context("HTTP host missing")?,
-            uri.port_u16().unwrap_or(80),
-        )?
+        Target::from_uri(&uri, 80)?
     };
     let (mut outbound, node) = match core.dial(&target, None).await {
         Ok(v) => v,
