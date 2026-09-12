@@ -66,9 +66,7 @@ async fn authorize(
     next.run(request).await
 }
 async fn config(State(core): State<Arc<Core>>) -> Json<Value> {
-    let mut value = serde_json::to_value(&core.config).unwrap();
-    value["mode"] = serde_json::to_value(&core.policy.read().unwrap().mode).unwrap();
-    Json(value)
+    Json(core.configuration())
 }
 async fn update(State(core): State<Arc<Core>>, Json(value): Json<Value>) -> ApiResult {
     let object = value.as_object().ok_or_else(|| error("expected object"))?;
@@ -84,13 +82,12 @@ async fn update(State(core): State<Arc<Core>>, Json(value): Json<Value>) -> ApiR
         .map(|m| serde_json::from_value(m.clone()))
         .transpose()
         .map_err(error)?;
-    if let Some(rules) = value.get("rules") {
-        core.replace_rules(serde_json::from_value(rules.clone()).map_err(error)?)
-            .map_err(error)?;
-    }
-    if let Some(mode) = mode {
-        core.set_mode(mode);
-    }
+    let rules = value
+        .get("rules")
+        .map(|rules| serde_json::from_value(rules.clone()))
+        .transpose()
+        .map_err(error)?;
+    core.update_policy(mode, rules).map_err(error)?;
     Ok(Json(json!({})))
 }
 fn proxy_map(core: &Core) -> serde_json::Map<String, Value> {
@@ -170,8 +167,56 @@ async fn close_all(State(core): State<Arc<Core>>) -> Json<Value> {
     Json(json!({}))
 }
 async fn traffic(State(core): State<Arc<Core>>, ws: WebSocketUpgrade) -> Response {
-    ws.on_upgrade(move|mut socket|async move{let(mut up,mut down)=(core.upload.load(Ordering::Relaxed),core.download.load(Ordering::Relaxed));let mut tick=tokio::time::interval(Duration::from_secs(1));loop{tokio::select!{_=core.stop.cancelled()=>break,_=tick.tick()=>{let(u,d)=(core.upload.load(Ordering::Relaxed),core.download.load(Ordering::Relaxed));if socket.send(Message::Text(json!({"up":u.saturating_sub(up),"down":d.saturating_sub(down)}).to_string().into())).await.is_err(){break;}(up,down)=(u,d);},_=socket.recv()=>break}}})
+    ws.on_upgrade(move |mut socket| async move {
+        let (mut up, mut down) = (core.upload.load(Ordering::Relaxed), core.download.load(Ordering::Relaxed));
+        let mut tick = tokio::time::interval(Duration::from_secs(1));
+        loop {
+            tokio::select! {
+                _ = core.stop.cancelled() => break,
+                _ = tick.tick() => {
+                    let (u, d) = (core.upload.load(Ordering::Relaxed), core.download.load(Ordering::Relaxed));
+                    let message = Message::Text(json!({"up":u.saturating_sub(up),"down":d.saturating_sub(down)}).to_string().into());
+                    if !send_ws(&core, &mut socket, message).await { break; }
+                    (up, down) = (u, d);
+                },
+                message = socket.recv() => if !handle_ws(&core, &mut socket, message).await { break; },
+            }
+        }
+    })
 }
 async fn logs(State(core): State<Arc<Core>>, ws: WebSocketUpgrade) -> Response {
-    ws.on_upgrade(move|mut socket|async move{let mut events=core.events.subscribe();loop{tokio::select!{_=core.stop.cancelled()=>break,event=events.recv()=>{match event{Ok(event)=>{if socket.send(Message::Text(event.into())).await.is_err(){break;}},Err(tokio::sync::broadcast::error::RecvError::Lagged(_))=>continue,Err(_)=>break}},_=socket.recv()=>break}}})
+    ws.on_upgrade(move |mut socket| async move {
+        let mut events = core.events.subscribe();
+        loop {
+            tokio::select! {
+                _ = core.stop.cancelled() => break,
+                event = events.recv() => match event {
+                    Ok(event) => if !send_ws(&core, &mut socket, Message::Text(event.into())).await { break; },
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                    Err(_) => break,
+                },
+                message = socket.recv() => if !handle_ws(&core, &mut socket, message).await { break; },
+            }
+        }
+    })
+}
+
+async fn send_ws(core: &Core, socket: &mut axum::extract::ws::WebSocket, message: Message) -> bool {
+    tokio::select! {
+        biased;
+        _ = core.stop.cancelled() => false,
+        result = tokio::time::timeout(Duration::from_secs(5), socket.send(message)) => matches!(result, Ok(Ok(()))),
+    }
+}
+
+async fn handle_ws(
+    core: &Core,
+    socket: &mut axum::extract::ws::WebSocket,
+    message: Option<Result<Message, axum::Error>>,
+) -> bool {
+    match message {
+        Some(Ok(Message::Ping(data))) => send_ws(core, socket, Message::Pong(data)).await,
+        Some(Ok(Message::Pong(_) | Message::Text(_) | Message::Binary(_))) => true,
+        _ => false,
+    }
 }

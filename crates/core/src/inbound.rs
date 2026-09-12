@@ -269,7 +269,7 @@ async fn http_connection(core: Arc<Core>, stream: &mut TcpStream) -> Result<()> 
             uri.port_u16().unwrap_or(80),
         )?
     };
-    let (mut outbound, _node) = match core.dial(&target, None).await {
+    let (mut outbound, node) = match core.dial(&target, None).await {
         Ok(v) => v,
         Err(e) => {
             stream
@@ -310,8 +310,7 @@ async fn http_connection(core: Arc<Core>, stream: &mut TcpStream) -> Result<()> 
         header.push_str(&format!("Host: {target}\r\nConnection: close\r\n\r\n"));
         outbound.write_all(header.as_bytes()).await?;
     }
-    tokio::select! {_=core.stop.cancelled()=>{},result=tokio::io::copy_bidirectional(stream,&mut outbound)=>{let(up,down)=result?;core.upload.fetch_add(up,std::sync::atomic::Ordering::Relaxed);core.download.fetch_add(down,std::sync::atomic::Ordering::Relaxed);}}
-    Ok(())
+    core.relay_io(stream, target, outbound, node).await
 }
 pub async fn dns_udp(core: Arc<Core>, socket: UdpSocket) {
     let socket = Arc::new(socket);

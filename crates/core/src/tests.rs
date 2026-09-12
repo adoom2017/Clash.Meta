@@ -1,5 +1,202 @@
 use super::*;
 use tokio::io::AsyncReadExt;
+use tower::ServiceExt;
+
+async fn api_call(
+    core: Arc<Core>,
+    method: &str,
+    path: &str,
+    body: &str,
+    secret: bool,
+) -> (u16, serde_json::Value) {
+    let mut request = http::Request::builder()
+        .method(method)
+        .uri(path)
+        .header("content-type", "application/json");
+    if secret {
+        request = request.header("authorization", format!("Bearer {}", core.config.secret));
+    }
+    let response = api::router(core)
+        .oneshot(
+            request
+                .body(axum::body::Body::from(body.to_owned()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let status = response.status().as_u16();
+    let body = axum::body::to_bytes(response.into_body(), 65536)
+        .await
+        .unwrap();
+    (status, serde_json::from_slice(&body).unwrap())
+}
+
+#[tokio::test]
+async fn controller_policy_updates_are_atomic_and_redacted() {
+    let config = Config::parse(b"secret: api-secret\nauthentication: ['user:password']\nproxy-groups:\n- name: choose\n  type: select\n  proxies: [DIRECT, REJECT]\nrules: ['MATCH,DIRECT']\n").unwrap();
+    let core = Core::new(config, Arc::new(meta_platform::DefaultHooks)).unwrap();
+    assert_eq!(
+        api_call(core.clone(), "GET", "/configs", "", false).await.0,
+        401
+    );
+    assert_eq!(
+        api_call(
+            core.clone(),
+            "PATCH",
+            "/configs",
+            r#"{"mode":"direct","rules":["MATCH,missing"]}"#,
+            true
+        )
+        .await
+        .0,
+        400
+    );
+    assert_eq!(core.configuration()["mode"], "rule");
+    assert_eq!(
+        api_call(
+            core.clone(),
+            "PATCH",
+            "/configs",
+            r#"{"rules":["MATCH,REJECT"]}"#,
+            true
+        )
+        .await
+        .0,
+        200
+    );
+    assert_eq!(
+        api_call(
+            core.clone(),
+            "PATCH",
+            "/configs",
+            r#"{"mode":"direct"}"#,
+            true
+        )
+        .await
+        .0,
+        200
+    );
+    let (_, config) = api_call(core.clone(), "GET", "/configs", "", true).await;
+    assert_eq!(config["mode"], "direct");
+    assert_eq!(config["rules"], serde_json::json!(["MATCH,REJECT"]));
+    assert!(config.get("authentication").is_none());
+    assert!(config.get("secret").is_none());
+    assert_eq!(
+        api_call(
+            core.clone(),
+            "PUT",
+            "/proxies/choose",
+            r#"{"name":"REJECT"}"#,
+            true
+        )
+        .await
+        .0,
+        200
+    );
+    assert_eq!(
+        api_call(core, "GET", "/proxies/choose", "", true).await.1["now"],
+        "REJECT"
+    );
+}
+
+#[tokio::test]
+async fn live_tcp_counters_close_and_abort_release_registry() {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        let core = Core::new(Config::default(), Arc::new(meta_platform::DefaultHooks)).unwrap();
+        for abort in [false, true] {
+            let (mut client, inbound) = tokio::io::duplex(1024);
+            let (outbound, mut peer) = tokio::io::duplex(1024);
+            let owner = core.clone();
+            let relay = tokio::spawn(async move {
+                owner
+                    .relay(
+                        Box::new(inbound),
+                        Target::new("example.test", 443).unwrap(),
+                        Box::new(outbound),
+                        "DIRECT".into(),
+                    )
+                    .await
+            });
+            client.write_all(b"request").await.unwrap();
+            let mut bytes = [0; 7];
+            peer.read_exact(&mut bytes).await.unwrap();
+            peer.write_all(b"reply").await.unwrap();
+            client.read_exact(&mut bytes[..5]).await.unwrap();
+            let info = core.connections();
+            assert_eq!(info.len(), 1);
+            assert_eq!((info[0].upload, info[0].download), (7, 5));
+            if abort {
+                relay.abort();
+                assert!(relay.await.unwrap_err().is_cancelled());
+            } else {
+                assert_eq!(
+                    api_call(
+                        core.clone(),
+                        "DELETE",
+                        &format!("/connections/{}", info[0].id),
+                        "",
+                        false
+                    )
+                    .await
+                    .0,
+                    200
+                );
+                relay.await.unwrap().unwrap();
+                assert_eq!(client.read(&mut bytes).await.unwrap(), 0);
+            }
+            assert!(core.connections().is_empty());
+        }
+        assert_eq!(core.upload.load(std::sync::atomic::Ordering::Relaxed), 14);
+        assert_eq!(core.download.load(std::sync::atomic::Ordering::Relaxed), 10);
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn udp_counters_close_and_core_cancellation_cover_dns_routing() {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        let udp = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let dns = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let mut config = Config::default();
+        config.dns.nameserver = vec![dns.local_addr().unwrap().to_string()];
+        config.dns.ipv6 = false;
+        config.rules = vec!["IP-CIDR,192.0.2.0/24,REJECT".into(), "MATCH,DIRECT".into()];
+        let core = Core::new(config, Arc::new(meta_platform::DefaultHooks)).unwrap();
+        let target = Target::parse(&udp.local_addr().unwrap().to_string()).unwrap();
+        let session = core.datagram(&target).await.unwrap();
+        session.send(&target, b"ping").await.unwrap();
+        let mut packet = [0; 1024];
+        let (_, addr) = udp.recv_from(&mut packet).await.unwrap();
+        udp.send_to(b"pong", addr).await.unwrap();
+        assert_eq!(session.recv().await.unwrap().1, b"pong");
+        let info = core.connections();
+        assert_eq!((info[0].upload, info[0].download), (4, 4));
+        api_call(core.clone(), "DELETE", "/connections", "", false).await;
+        assert!(session.send(&target, b"closed").await.is_err());
+        assert!(session.recv().await.is_err());
+        drop(session);
+        assert!(core.connections().is_empty());
+        let owner = core.clone();
+        let dial = tokio::spawn(async move {
+            owner
+                .dial(&Target::new("pending.test", 80).unwrap(), None)
+                .await
+        });
+        dns.recv_from(&mut packet).await.unwrap();
+        core.stop.cancel();
+        assert!(
+            tokio::time::timeout(Duration::from_millis(200), dial)
+                .await
+                .unwrap()
+                .unwrap()
+                .is_err()
+        );
+        assert!(core.datagram(&target).await.is_err());
+    })
+    .await
+    .unwrap();
+}
 
 fn free_port() -> u16 {
     std::net::TcpListener::bind("127.0.0.1:0")

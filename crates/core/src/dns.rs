@@ -2,7 +2,7 @@ use anyhow::{Context, Result, ensure};
 use hickory_proto::{
     op::{Message, MessageType, OpCode, Query, ResponseCode},
     rr::{
-        Name, RData, Record, RecordType,
+        DNSClass, Name, RData, Record, RecordType,
         rdata::{A, AAAA},
     },
 };
@@ -16,21 +16,31 @@ use std::{
     time::{Duration, Instant},
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+#[cfg(test)]
+#[path = "dns_tests.rs"]
+mod tests;
 
 struct CacheEntry {
-    records: Vec<Record>,
+    response: Message,
+    inserted: Instant,
     expires: Instant,
+    size: usize,
+}
+#[derive(Default)]
+struct Cache {
+    entries: HashMap<Vec<u8>, CacheEntry>,
+    size: usize,
 }
 struct FakeMap {
     by_name: HashMap<(String, bool), IpAddr>,
     by_ip: HashMap<IpAddr, String>,
-    next4: u32,
+    next4: u64,
     next6: u128,
 }
 pub struct Resolver {
     pub config: Dns,
     hooks: Hooks,
-    cache: Mutex<HashMap<(String, RecordType), CacheEntry>>,
+    cache: Mutex<Cache>,
     fake: Mutex<FakeMap>,
 }
 impl Resolver {
@@ -38,7 +48,7 @@ impl Resolver {
         Self {
             config,
             hooks,
-            cache: Mutex::new(HashMap::new()),
+            cache: Mutex::new(Cache::default()),
             fake: Mutex::new(FakeMap {
                 by_name: HashMap::new(),
                 by_ip: HashMap::new(),
@@ -73,56 +83,108 @@ impl Resolver {
         Ok(addresses)
     }
     async fn records(&self, host: &str, kind: RecordType) -> Result<Vec<Record>> {
-        let key = (host.trim_end_matches('.').to_ascii_lowercase(), kind);
-        if let Some(entry) = self.cache.lock().unwrap().get(&key)
-            && entry.expires > Instant::now()
-        {
-            let ttl = entry
-                .expires
-                .saturating_duration_since(Instant::now())
-                .as_secs() as u32;
-            let mut records = entry.records.clone();
-            for r in &mut records {
-                r.set_ttl(r.ttl().min(ttl));
-            }
-            return Ok(records);
-        }
         let query = Query::query(Name::from_ascii(host)?, kind);
         let mut request = Message::new();
         request
             .set_id(uuid::Uuid::new_v4().as_u128() as u16)
             .set_recursion_desired(true)
             .add_query(query);
-        let response = self.exchange(&request).await?;
+        let response = self.cached_exchange(&request).await?;
         ensure!(
             response.response_code() == ResponseCode::NoError
                 || response.response_code() == ResponseCode::NXDomain,
             "DNS server rejected query"
         );
-        let records = response.answers().to_vec();
-        let ttl = records
-            .iter()
-            .map(Record::ttl)
-            .min()
-            .unwrap_or(30)
-            .min(3600);
-        if ttl > 0 {
-            let mut cache = self.cache.lock().unwrap();
-            cache.retain(|_, v| v.expires > Instant::now());
-            if cache.len() >= 4096
-                && let Some(k) = cache.keys().next().cloned()
+        Ok(response.answers().to_vec())
+    }
+    async fn cached_exchange(&self, request: &Message) -> Result<Message> {
+        // Keep EDNS, DNSSEC, recursion flags and query class in the cache key.
+        let mut key_request = request.clone();
+        key_request.set_id(0);
+        let key = key_request.to_vec()?;
+        {
+            let cache = self.cache.lock().unwrap();
+            if let Some(entry) = cache.entries.get(&key)
+                && entry.expires > Instant::now()
             {
-                cache.remove(&k);
+                let mut response = entry.response.clone();
+                response.set_id(request.id());
+                let elapsed = entry.inserted.elapsed().as_secs().min(u32::MAX as u64) as u32;
+                for record in response.answers_mut().iter_mut() {
+                    record.set_ttl(record.ttl().saturating_sub(elapsed));
+                }
+                for record in response.name_servers_mut().iter_mut() {
+                    record.set_ttl(record.ttl().saturating_sub(elapsed));
+                }
+                for record in response.additionals_mut().iter_mut() {
+                    record.set_ttl(record.ttl().saturating_sub(elapsed));
+                }
+                return Ok(response);
             }
-            cache.insert(
-                key,
-                CacheEntry {
-                    records: records.clone(),
-                    expires: Instant::now() + Duration::from_secs(ttl as u64),
-                },
-            );
         }
-        Ok(records)
+        let response = self.exchange(request).await?;
+        let negative =
+            response.response_code() == ResponseCode::NXDomain || response.answers().is_empty();
+        let ttl = if negative {
+            response
+                .name_servers()
+                .iter()
+                .filter_map(|r| match r.data() {
+                    RData::SOA(soa) => Some(r.ttl().min(soa.minimum())),
+                    _ => None,
+                })
+                .min()
+                .unwrap_or(0)
+        } else {
+            response
+                .answers()
+                .iter()
+                .chain(response.name_servers())
+                .chain(response.additionals())
+                .map(Record::ttl)
+                .min()
+                .unwrap_or(0)
+        }
+        .min(3600);
+        if ttl > 0
+            && !response.truncated()
+            && matches!(
+                response.response_code(),
+                ResponseCode::NoError | ResponseCode::NXDomain
+            )
+        {
+            let size = key.len() + response.to_vec()?.len();
+            let mut cache = self.cache.lock().unwrap();
+            cache
+                .entries
+                .retain(|_, entry| entry.expires > Instant::now());
+            cache.entries.remove(&key);
+            cache.size = cache.entries.values().map(|entry| entry.size).sum();
+            while cache.entries.len() >= 4096 || cache.size + size > 8 * 1024 * 1024 {
+                let Some(oldest) = cache
+                    .entries
+                    .iter()
+                    .min_by_key(|(_, entry)| entry.inserted)
+                    .map(|(key, _)| key.clone())
+                else {
+                    break;
+                };
+                cache.size -= cache.entries.remove(&oldest).unwrap().size;
+            }
+            if size <= 8 * 1024 * 1024 {
+                cache.entries.insert(
+                    key,
+                    CacheEntry {
+                        response: response.clone(),
+                        inserted: Instant::now(),
+                        expires: Instant::now() + Duration::from_secs(ttl as u64),
+                        size,
+                    },
+                );
+                cache.size += size;
+            }
+        }
+        Ok(response)
     }
     async fn exchange(&self, request: &Message) -> Result<Message> {
         let mut error = anyhow::anyhow!("no DNS upstream");
@@ -144,19 +206,28 @@ impl Resolver {
         if let Ok(ip) = host.parse() {
             return Ok(SocketAddr::new(ip, port));
         }
-        let mut msg = Message::new();
-        msg.set_id(uuid::Uuid::new_v4().as_u128() as u16)
-            .set_recursion_desired(true)
-            .add_query(Query::query(Name::from_ascii(host)?, RecordType::A));
-        for server in &self.config.default_nameserver {
-            let addr = parse_server(server, 53)?;
-            let Ok(ip) = addr.host.parse::<IpAddr>() else {
+        for kind in [RecordType::A, RecordType::AAAA] {
+            if kind == RecordType::AAAA && !self.config.ipv6 {
                 continue;
-            };
-            if let Ok(response) = self.raw_udp(SocketAddr::new(ip, addr.port), &msg).await {
-                for r in response.answers() {
-                    if let RData::A(ip) = r.data() {
-                        return Ok(SocketAddr::new(IpAddr::V4(ip.0), port));
+            }
+            let mut msg = Message::new();
+            msg.set_id(uuid::Uuid::new_v4().as_u128() as u16)
+                .set_recursion_desired(true)
+                .add_query(Query::query(Name::from_ascii(host)?, kind));
+            for server in &self.config.default_nameserver {
+                let addr = parse_server(server.trim_start_matches("udp://"), 53)?;
+                let Ok(ip) = addr.host.parse::<IpAddr>() else {
+                    continue;
+                };
+                if let Ok(response) = self.raw_udp(SocketAddr::new(ip, addr.port), &msg).await {
+                    for r in response.answers() {
+                        match r.data() {
+                            RData::A(ip) => return Ok(SocketAddr::new(IpAddr::V4(ip.0), port)),
+                            RData::AAAA(ip) if self.config.ipv6 => {
+                                return Ok(SocketAddr::new(IpAddr::V6(ip.0), port));
+                            }
+                            _ => {}
+                        }
                     }
                 }
             }
@@ -165,83 +236,56 @@ impl Resolver {
     }
     async fn query_upstream(&self, server: &str, request: &Message) -> Result<Message> {
         if server.starts_with("https://") {
+            use http_body_util::{BodyExt, Full, Limited};
             let uri: http::Uri = server.parse()?;
             let host = uri.host().context("DoH host missing")?;
-            let addr = self.bootstrap(host, uri.port_u16().unwrap_or(443)).await?;
+            let target = Target::parse(&format!("{host}:{}", uri.port_u16().unwrap_or(443)))?;
+            let addr = self.bootstrap(&target.host, target.port).await?;
             let socket = meta_platform::tcp_connect(addr, &*self.hooks).await?;
             let config = meta_protocol::tls::config(&["http/1.1".into()], false)?;
-            let mut tls = tokio_rustls::TlsConnector::from(std::sync::Arc::new(config))
+            let tls = tokio_rustls::TlsConnector::from(std::sync::Arc::new(config))
                 .connect(
-                    rustls::pki_types::ServerName::try_from(host.to_owned())?,
+                    rustls::pki_types::ServerName::try_from(target.host)?,
                     socket,
                 )
                 .await?;
-            let body = request.to_vec()?;
+            let (mut sender, connection) = hyper::client::conn::http1::Builder::new()
+                .max_buf_size(16384)
+                .handshake(hyper_util::rt::TokioIo::new(tls))
+                .await?;
+            let _driver = tokio_util::task::AbortOnDropHandle::new(tokio::spawn(connection));
             let path = uri
                 .path_and_query()
                 .map(|v| v.as_str())
                 .unwrap_or("/dns-query");
-            let header = format!(
-                "POST {path} HTTP/1.1\r\nHost: {host}\r\nContent-Type: application/dns-message\r\nAccept: application/dns-message\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-                body.len()
+            let outgoing = http::Request::post(path)
+                .header(
+                    http::header::HOST,
+                    uri.authority().context("DoH authority missing")?.as_str(),
+                )
+                .header(http::header::CONTENT_TYPE, "application/dns-message")
+                .header(http::header::ACCEPT, "application/dns-message")
+                .body(Full::new(bytes::Bytes::from(request.to_vec()?)))?;
+            let response = sender.send_request(outgoing).await?;
+            ensure!(response.status() == http::StatusCode::OK, "DoH HTTP error");
+            ensure!(
+                response
+                    .headers()
+                    .get(http::header::CONTENT_TYPE)
+                    .and_then(|v| v.to_str().ok())
+                    .is_some_and(|v| v
+                        .split(';')
+                        .next()
+                        .unwrap_or("")
+                        .trim()
+                        .eq_ignore_ascii_case("application/dns-message")),
+                "DoH content type mismatch"
             );
-            tls.write_all(header.as_bytes()).await?;
-            tls.write_all(&body).await?;
-            tls.flush().await?;
-            let mut response = vec![];
-            let mut byte = [0];
-            while !response.ends_with(b"\r\n\r\n") {
-                ensure!(response.len() < 16384, "DoH header limit");
-                tls.read_exact(&mut byte).await?;
-                response.push(byte[0]);
-            }
-            let mut headers = [httparse::EMPTY_HEADER; 64];
-            let mut parsed = httparse::Response::new(&mut headers);
-            parsed.parse(&response)?;
-            ensure!(parsed.code == Some(200), "DoH HTTP error");
-            let chunked = parsed.headers.iter().any(|h| {
-                h.name.eq_ignore_ascii_case("transfer-encoding")
-                    && h.value.eq_ignore_ascii_case(b"chunked")
-            });
-            let mut body = vec![];
-            if chunked {
-                loop {
-                    let mut line = vec![];
-                    while !line.ends_with(b"\r\n") {
-                        ensure!(line.len() < 128, "DoH chunk header limit");
-                        tls.read_exact(&mut byte).await?;
-                        line.push(byte[0]);
-                    }
-                    let n = usize::from_str_radix(
-                        std::str::from_utf8(&line)?
-                            .trim()
-                            .split(';')
-                            .next()
-                            .unwrap(),
-                        16,
-                    )?;
-                    if n == 0 {
-                        break;
-                    }
-                    ensure!(body.len() + n <= 65535, "DoH body limit");
-                    let start = body.len();
-                    body.resize(start + n, 0);
-                    tls.read_exact(&mut body[start..]).await?;
-                    let mut crlf = [0; 2];
-                    tls.read_exact(&mut crlf).await?;
-                    ensure!(&crlf == b"\r\n", "invalid chunk terminator");
-                }
-            } else {
-                let n = parsed
-                    .headers
-                    .iter()
-                    .find(|h| h.name.eq_ignore_ascii_case("content-length"))
-                    .context("DoH content-length missing")?;
-                let n = std::str::from_utf8(n.value)?.parse::<usize>()?;
-                ensure!(n <= 65535, "DoH body limit");
-                body.resize(n, 0);
-                tls.read_exact(&mut body).await?;
-            }
+            let body = Limited::new(response.into_body(), 65535)
+                .collect()
+                .await
+                .map_err(anyhow::Error::from_boxed)?
+                .to_bytes();
             let response = Message::from_vec(&body)?;
             validate_response(request, &response)?;
             return Ok(response);
@@ -318,21 +362,31 @@ impl Resolver {
             .set_recursion_desired(request.recursion_desired())
             .set_recursion_available(true)
             .add_query(query.clone());
-        if query.query_type() == RecordType::AAAA && !self.config.ipv6 {
+        if query.query_class() == DNSClass::IN
+            && query.query_type() == RecordType::AAAA
+            && !self.config.ipv6
+        {
             return Ok(response.to_vec()?);
         }
         if self.config.enhanced_mode == "fake-ip"
             && !excluded
+            && query.query_class() == DNSClass::IN
             && matches!(query.query_type(), RecordType::A | RecordType::AAAA)
         {
-            let ip = self.fake_address(&host, query.query_type() == RecordType::AAAA)?;
+            let ip = match self.fake_address(&host, query.query_type() == RecordType::AAAA) {
+                Ok(ip) => ip,
+                Err(_) => {
+                    response.set_response_code(ResponseCode::ServFail);
+                    return Ok(response.to_vec()?);
+                }
+            };
             let data = match ip {
                 IpAddr::V4(ip) => RData::A(A(ip)),
                 IpAddr::V6(ip) => RData::AAAA(AAAA(ip)),
             };
             response.add_answer(Record::from_rdata(query.name().clone(), 60, data));
         } else {
-            match self.exchange(&request).await {
+            match self.cached_exchange(&request).await {
                 Ok(upstream) => {
                     response = upstream;
                 }
@@ -355,13 +409,19 @@ impl Resolver {
         );
         let ip = if v6 {
             let net = self.config.fake_ip_range6;
-            let ip = std::net::Ipv6Addr::from(u128::from(net.network()) + map.next6);
+            let address = u128::from(net.network())
+                .checked_add(map.next6)
+                .context("fake-IP v6 pool exhausted")?;
+            let ip = std::net::Ipv6Addr::from(address);
             ensure!(net.contains(&ip), "fake-IP v6 pool exhausted");
             map.next6 += 1;
             IpAddr::V6(ip)
         } else {
             let net = self.config.fake_ip_range;
-            let ip = std::net::Ipv4Addr::from(u32::from(net.network()) + map.next4);
+            let address = u64::from(u32::from(net.network())) + map.next4;
+            let ip = std::net::Ipv4Addr::from(
+                u32::try_from(address).context("fake-IP v4 pool exhausted")?,
+            );
             ensure!(
                 net.contains(&ip) && ip != net.broadcast(),
                 "fake-IP v4 pool exhausted"
@@ -387,6 +447,7 @@ fn validate_response(request: &Message, response: &Message) -> Result<()> {
     ensure!(
         response.id() == request.id()
             && response.message_type() == MessageType::Response
+            && response.op_code() == request.op_code()
             && response.queries() == request.queries(),
         "DNS response mismatch"
     );

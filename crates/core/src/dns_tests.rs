@@ -1,0 +1,165 @@
+use super::*;
+use hickory_proto::rr::rdata::SOA;
+use std::sync::{
+    Arc,
+    atomic::{AtomicUsize, Ordering},
+};
+
+fn request(name: &str, id: u16) -> Message {
+    let mut request = Message::new();
+    request
+        .set_id(id)
+        .set_recursion_desired(true)
+        .add_query(Query::query(Name::from_ascii(name).unwrap(), RecordType::A));
+    request
+}
+
+#[tokio::test]
+async fn cache_preserves_negative_answers_ttls_and_query_flags() {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        for negative in [false, true] {
+            let udp = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+            let config = Dns {
+                nameserver: vec![udp.local_addr().unwrap().to_string()],
+                enhanced_mode: "redir-host".into(),
+                ipv6: false,
+                ..Dns::default()
+            };
+            let count = Arc::new(AtomicUsize::new(0));
+            let received = count.clone();
+            let server = tokio_util::task::AbortOnDropHandle::new(tokio::spawn(async move {
+                let mut buffer = [0; 4096];
+                loop {
+                    let (n, peer) = udp.recv_from(&mut buffer).await.unwrap();
+                    let mut reply = Message::from_vec(&buffer[..n]).unwrap();
+                    received.fetch_add(1, Ordering::Relaxed);
+                    reply
+                        .set_message_type(MessageType::Response)
+                        .set_recursion_available(true);
+                    if negative {
+                        reply.set_response_code(ResponseCode::NXDomain);
+                        reply.add_name_server(Record::from_rdata(
+                            Name::from_ascii("test").unwrap(),
+                            60,
+                            RData::SOA(SOA::new(
+                                Name::from_ascii("ns.test").unwrap(),
+                                Name::from_ascii("hostmaster.test").unwrap(),
+                                1,
+                                60,
+                                60,
+                                60,
+                                10,
+                            )),
+                        ));
+                    } else {
+                        reply.add_answer(Record::from_rdata(
+                            reply.queries()[0].name().clone(),
+                            30,
+                            RData::A(A("192.0.2.1".parse().unwrap())),
+                        ));
+                    }
+                    udp.send_to(&reply.to_vec().unwrap(), peer).await.unwrap();
+                }
+            }));
+            let resolver = Resolver::new(config, Arc::new(meta_platform::DefaultHooks));
+            for id in [10, 20] {
+                let reply = Message::from_vec(
+                    &resolver
+                        .answer(&request("cache.test", id).to_vec().unwrap())
+                        .await
+                        .unwrap(),
+                )
+                .unwrap();
+                assert_eq!(reply.id(), id);
+                assert_eq!(
+                    reply.response_code(),
+                    if negative {
+                        ResponseCode::NXDomain
+                    } else {
+                        ResponseCode::NoError
+                    }
+                );
+                assert_eq!(reply.name_servers().len(), usize::from(negative));
+            }
+            assert_eq!(count.load(Ordering::Relaxed), 1);
+            assert_eq!(resolver.lookup("cache.test", 80).await.is_err(), negative);
+            assert_eq!(count.load(Ordering::Relaxed), 1);
+            for entry in resolver.cache.lock().unwrap().entries.values_mut() {
+                entry.inserted -= Duration::from_secs(2);
+            }
+            let reply = Message::from_vec(
+                &resolver
+                    .answer(&request("cache.test", 30).to_vec().unwrap())
+                    .await
+                    .unwrap(),
+            )
+            .unwrap();
+            let ttl = if negative {
+                reply.name_servers()[0].ttl()
+            } else {
+                reply.answers()[0].ttl()
+            };
+            assert_eq!(ttl, if negative { 58 } else { 28 });
+            let mut different = request("cache.test", 40);
+            different.set_checking_disabled(true);
+            resolver.answer(&different.to_vec().unwrap()).await.unwrap();
+            assert_eq!(count.load(Ordering::Relaxed), 2);
+            for entry in resolver.cache.lock().unwrap().entries.values_mut() {
+                entry.expires = Instant::now();
+            }
+            resolver
+                .answer(&request("cache.test", 50).to_vec().unwrap())
+                .await
+                .unwrap();
+            assert_eq!(count.load(Ordering::Relaxed), 3);
+            drop(server);
+        }
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn exhausted_fake_pools_fail_without_overflow_or_mapping_reuse() {
+    for (v4, v6) in [
+        (
+            "255.255.255.254/31",
+            "ffff:ffff:ffff:ffff:ffff:ffff:ffff:fffe/127",
+        ),
+        (
+            "255.255.255.255/32",
+            "ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff/128",
+        ),
+    ] {
+        let resolver = Resolver::new(
+            Dns {
+                fake_ip_range: v4.parse().unwrap(),
+                fake_ip_range6: v6.parse().unwrap(),
+                ..Dns::default()
+            },
+            Arc::new(meta_platform::DefaultHooks),
+        );
+        for kind in [RecordType::A, RecordType::AAAA] {
+            let mut query = request("exhausted.test", 1);
+            query.queries_mut()[0].set_query_type(kind);
+            let response =
+                Message::from_vec(&resolver.answer(&query.to_vec().unwrap()).await.unwrap())
+                    .unwrap();
+            assert_eq!(response.response_code(), ResponseCode::ServFail);
+        }
+    }
+    let resolver = Resolver::new(
+        Dns {
+            fake_ip_range: "198.18.0.0/30".parse().unwrap(),
+            ..Dns::default()
+        },
+        Arc::new(meta_platform::DefaultHooks),
+    );
+    let allocated = resolver.fake_address("first.test", false).unwrap();
+    assert!(resolver.fake_address("second.test", false).is_err());
+    assert_eq!(resolver.original(allocated).as_deref(), Some("first.test"));
+    assert_eq!(
+        resolver.fake_address("first.test", false).unwrap(),
+        allocated
+    );
+}

@@ -65,6 +65,17 @@ and restart. The generic Quinn DATAGRAM cap patch has an independent test.
 ASan fuzzing exposed an address normalization assertion, now covered by a fixed
 regression; the final parser completed 653,100 inputs. See `hysteria2-protocol.md`.
 
+Core runtime update: TCP and UDP now expose live byte counters, bounded tracked
+connections and cancellation cleanup. HTTP forwarding uses the same relay path.
+HY2 connection setup locks are per node. Routing/DNS waits are included in dial
+timeouts and core cancellation. Controller mode/rule updates validate atomically,
+configuration reads reflect current policy and omit local authentication. WebSocket
+sends are bounded and respond to pings. DNS caches complete positive/negative
+responses (including SOA, flags and remaining TTL), with 4,096 entries / 8 MiB
+limits; DoH uses Hyper with bounded bodies. Fake-IP exhaustion returns SERVFAIL
+without overflowing or reusing live mappings. Eight core tests and strict
+workspace Clippy pass on Windows. Full desktop/FFI acceptance remains below.
+
 1. Finish extracting synthetic legacy compatibility vectors, remove Go product
    sources/build flows after Rust replacement is ready, and commit independently.
 2. HY2 protocol validation is complete for the documented oracle matrix. Continue

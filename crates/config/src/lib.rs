@@ -25,6 +25,7 @@ pub struct Config {
     pub mixed_port: u16,
     pub allow_lan: bool,
     pub bind_address: String,
+    #[serde(skip_serializing)]
     pub authentication: Vec<String>,
     pub mode: Mode,
     pub ipv6: bool,

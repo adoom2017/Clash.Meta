@@ -4,6 +4,7 @@ pub mod dns;
 mod inbound;
 #[cfg(test)]
 mod tests;
+mod traffic;
 
 use anyhow::{Context, Result, bail, ensure};
 use async_trait::async_trait;
@@ -17,10 +18,7 @@ use serde::Serialize;
 use std::{
     collections::HashMap,
     net::SocketAddr,
-    sync::{
-        Arc, Mutex, RwLock,
-        atomic::{AtomicU64, Ordering},
-    },
+    sync::{Arc, Mutex, RwLock, atomic::AtomicU64},
     time::{Duration, Instant},
 };
 use tokio::{io::AsyncWriteExt, task::JoinSet};
@@ -31,9 +29,9 @@ pub struct Core {
     pub resolver: Arc<dns::Resolver>,
     hooks: Hooks,
     policy: RwLock<Policy>,
-    hy2: tokio::sync::Mutex<HashMap<String, Arc<meta_protocol::hysteria2::Client>>>,
+    hy2: HashMap<String, tokio::sync::Mutex<Option<Arc<meta_protocol::hysteria2::Client>>>>,
     pub stop: CancellationToken,
-    connections: Mutex<HashMap<String, Connection>>,
+    connections: Mutex<HashMap<String, Arc<traffic::State>>>,
     pub upload: AtomicU64,
     pub download: AtomicU64,
     slots: Arc<tokio::sync::Semaphore>,
@@ -43,6 +41,7 @@ pub struct Core {
 struct Policy {
     mode: Mode,
     rules: Vec<Rule>,
+    raw_rules: Vec<String>,
     selection: HashMap<String, String>,
     delay: HashMap<String, u64>,
 }
@@ -68,7 +67,9 @@ impl Running {
         self.core.stop.cancel();
         self.tasks.abort_all();
         while self.tasks.join_next().await.is_some() {}
-        self.core.hy2.lock().await.clear();
+        for client in self.core.hy2.values() {
+            client.lock().await.take();
+        }
         *self.core.lifecycle.lock().unwrap() = false;
     }
 }
@@ -81,7 +82,9 @@ impl Drop for Running {
 impl Core {
     pub fn new(config: Config, hooks: Hooks) -> Result<Arc<Self>> {
         config.validate()?;
-        let resolver = Arc::new(dns::Resolver::new(config.dns.clone(), hooks.clone()));
+        let mut dns = config.dns.clone();
+        dns.ipv6 &= config.ipv6;
+        let resolver = Arc::new(dns::Resolver::new(dns, hooks.clone()));
         let mut selection = HashMap::new();
         for group in &config.proxy_groups {
             selection.insert(group.name.clone(), group.proxies[0].clone());
@@ -93,17 +96,24 @@ impl Core {
             .collect::<Result<Vec<_>>>()?;
         let policy = Policy {
             mode: config.mode.clone(),
+            raw_rules: config.rules.clone(),
             rules,
             selection,
             delay: HashMap::new(),
         };
         let (events, _) = tokio::sync::broadcast::channel(256);
+        let hy2 = config
+            .proxies
+            .iter()
+            .filter(|p| p.kind == ProxyKind::Hysteria2)
+            .map(|p| (p.name.clone(), tokio::sync::Mutex::new(None)))
+            .collect();
         Ok(Arc::new(Self {
             config,
             resolver,
             hooks,
             policy: RwLock::new(policy),
-            hy2: Default::default(),
+            hy2,
             stop: CancellationToken::new(),
             connections: Default::default(),
             upload: AtomicU64::new(0),
@@ -298,16 +308,41 @@ impl Core {
         self.policy.write().unwrap().mode = mode;
     }
     pub fn replace_rules(&self, rules: Vec<String>) -> Result<()> {
+        self.update_policy(None, Some(rules))
+    }
+    pub fn update_policy(&self, mode: Option<Mode>, rules: Option<Vec<String>>) -> Result<()> {
+        let update_rules = rules.is_some();
         let mut cfg = self.config.clone();
-        cfg.rules = rules;
+        if let Some(rules) = rules {
+            cfg.rules = rules;
+        } else {
+            cfg.rules = self.policy.read().unwrap().raw_rules.clone();
+        }
+        if let Some(mode) = &mode {
+            cfg.mode = mode.clone();
+        }
         cfg.validate()?;
         let rules = cfg
             .rules
             .iter()
             .map(|r| Rule::parse(r))
             .collect::<Result<_>>()?;
-        self.policy.write().unwrap().rules = rules;
+        let mut policy = self.policy.write().unwrap();
+        if update_rules {
+            policy.rules = rules;
+            policy.raw_rules = cfg.rules;
+        }
+        if let Some(mode) = mode {
+            policy.mode = mode;
+        }
         Ok(())
+    }
+    pub fn configuration(&self) -> serde_json::Value {
+        let mut config = serde_json::to_value(&self.config).unwrap();
+        let policy = self.policy.read().unwrap();
+        config["mode"] = serde_json::to_value(&policy.mode).unwrap();
+        config["rules"] = serde_json::to_value(&policy.raw_rules).unwrap();
+        config
     }
     async fn raw_tcp(&self, target: &Target) -> Result<tokio::net::TcpStream> {
         let addresses = self.resolver.lookup(&target.host, target.port).await?;
@@ -330,8 +365,13 @@ impl Core {
         &self,
         proxy: &meta_config::Proxy,
     ) -> Result<Arc<meta_protocol::hysteria2::Client>> {
-        let mut clients = self.hy2.lock().await;
-        if let Some(client) = clients.get(&proxy.name)
+        let mut cached = self
+            .hy2
+            .get(&proxy.name)
+            .context("HY2 proxy not found")?
+            .lock()
+            .await;
+        if let Some(client) = cached.as_ref()
             && !client.is_closed()
         {
             return Ok(client.clone());
@@ -344,7 +384,7 @@ impl Core {
             .next()
             .context("no HY2 server address")?;
         let client = meta_protocol::hysteria2::Client::connect(proxy, remote, &*self.hooks).await?;
-        clients.insert(proxy.name.clone(), client.clone());
+        *cached = Some(client.clone());
         Ok(client)
     }
     async fn vless_stream(
@@ -359,6 +399,17 @@ impl Core {
         meta_protocol::vless::connect(socket, proxy, target, command).await
     }
     pub async fn dial(
+        &self,
+        target: &Target,
+        selected: Option<&str>,
+    ) -> Result<(BoxStream, String)> {
+        tokio::select! {
+            biased;
+            _ = self.stop.cancelled() => bail!("core stopped"),
+            result = tokio::time::timeout(Duration::from_secs(20), self.dial_inner(target, selected)) => result?,
+        }
+    }
+    async fn dial_inner(
         &self,
         target: &Target,
         selected: Option<&str>,
@@ -391,9 +442,21 @@ impl Core {
         .await??;
         Ok((stream, name))
     }
-    pub async fn datagram(&self, target: &Target) -> Result<Arc<dyn Datagram>> {
+    pub async fn datagram(self: &Arc<Self>, target: &Target) -> Result<Arc<dyn Datagram>> {
         let target = self.restore_target(target);
-        let name = self.route(&target, "udp").await?;
+        tokio::select! {
+            biased;
+            _=self.stop.cancelled()=>bail!("core stopped"),
+            result=tokio::time::timeout(Duration::from_secs(20),async {
+                let name=self.route(&target,"udp").await?;
+                let inner=self.datagram_inner(&target,&name).await?;
+                Ok::<Arc<dyn Datagram>,anyhow::Error>(Arc::new(traffic::PacketSession {
+                    inner,tracker:traffic::Tracker::new(self.clone(),target,name,"udp")?
+                }))
+            })=>result?,
+        }
+    }
+    async fn datagram_inner(&self, target: &Target, name: &str) -> Result<Arc<dyn Datagram>> {
         if name == "REJECT" {
             bail!("UDP rejected");
         }
@@ -413,7 +476,10 @@ impl Core {
             .parse()?;
             let socket = meta_platform::udp_bind(bind, &*self.hooks)?;
             socket.connect(remote).await?;
-            return Ok(Arc::new(DirectUdp { socket, target }));
+            return Ok(Arc::new(DirectUdp {
+                socket,
+                target: target.clone(),
+            }));
         }
         let proxy = self
             .config
@@ -428,13 +494,17 @@ impl Core {
                     || proxy.packet_encoding.as_deref() == Some("xudp")
                     || proxy.flow == "xtls-rprx-vision";
                 let stream = self
-                    .vless_stream(proxy, &target, if xudp { 3 } else { 2 })
+                    .vless_stream(proxy, target, if xudp { 3 } else { 2 })
                     .await?;
                 if xudp {
-                    Ok(Arc::new(meta_protocol::xudp::Session::new(stream, target)))
+                    Ok(Arc::new(meta_protocol::xudp::Session::new(
+                        stream,
+                        target.clone(),
+                    )))
                 } else {
                     Ok(Arc::new(meta_protocol::vless::UdpSession::new(
-                        stream, target,
+                        stream,
+                        target.clone(),
                     )))
                 }
             }
@@ -443,42 +513,54 @@ impl Core {
     }
     pub async fn relay(
         self: &Arc<Self>,
-        mut inbound: BoxStream,
+        inbound: BoxStream,
         target: Target,
-        mut outbound: BoxStream,
+        outbound: BoxStream,
         node: String,
     ) -> Result<()> {
-        let id = uuid::Uuid::new_v4().to_string();
-        let cancel = self.stop.child_token();
-        self.connections.lock().unwrap().insert(
-            id.clone(),
-            Connection {
-                id: id.clone(),
-                metadata: target,
-                network: "tcp".into(),
-                chains: vec![node],
-                upload: 0,
-                download: 0,
-                start: std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)?
-                    .as_secs()
-                    .to_string(),
-                cancel: cancel.clone(),
-            },
-        );
-        let result = tokio::select! {_=cancel.cancelled()=>Ok((0,0)),result=tokio::io::copy_bidirectional(&mut inbound,&mut outbound)=>result};
-        self.connections.lock().unwrap().remove(&id);
-        let (up, down) = result?;
-        self.upload.fetch_add(up, Ordering::Relaxed);
-        self.download.fetch_add(down, Ordering::Relaxed);
+        self.relay_io(inbound, target, outbound, node).await
+    }
+    pub(crate) async fn relay_io<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin>(
+        self: &Arc<Self>,
+        mut inbound: S,
+        target: Target,
+        outbound: BoxStream,
+        node: String,
+    ) -> Result<()> {
+        let tracker = traffic::Tracker::new(self.clone(), target, node, "tcp")?;
+        let cancel = tracker.cancel();
+        let mut outbound = traffic::Stream {
+            inner: outbound,
+            tracker,
+        };
+        let mut interval = tokio::time::interval(Duration::from_secs(30));
+        let state = outbound.tracker.state.clone();
+        let idle = async {
+            loop {
+                interval.tick().await;
+                if state.idle() >= Duration::from_secs(300) {
+                    break;
+                }
+            }
+        };
+        tokio::select! {
+            _=cancel.cancelled()=>{},
+            _=idle=>{},
+            result=tokio::io::copy_bidirectional(&mut inbound,&mut outbound)=>{result?;},
+        }
         Ok(())
     }
     pub fn connections(&self) -> Vec<Connection> {
-        self.connections.lock().unwrap().values().cloned().collect()
+        self.connections
+            .lock()
+            .unwrap()
+            .values()
+            .map(|s| s.snapshot())
+            .collect()
     }
     pub fn close_connection(&self, id: &str) {
         if let Some(c) = self.connections.lock().unwrap().get(id) {
-            c.cancel.cancel();
+            c.snapshot().cancel.cancel();
         }
     }
     pub async fn probe(&self, name: &str, url: &str, timeout: Duration) -> Result<u64> {
@@ -525,7 +607,11 @@ impl Core {
             ensure!(&byte[..5] == b"HTTP/", "invalid health response");
             Ok::<_, anyhow::Error>(())
         };
-        tokio::time::timeout(timeout, operation).await??;
+        tokio::select! {
+            biased;
+            _ = self.stop.cancelled() => bail!("core stopped"),
+            result = tokio::time::timeout(timeout, operation) => result??,
+        }
         let elapsed = start.elapsed().as_millis() as u64;
         self.policy
             .write()

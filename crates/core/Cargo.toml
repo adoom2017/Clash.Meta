@@ -25,3 +25,8 @@ axum = { version = "0.8", features = ["ws"] }
 futures-util = "0.3"
 hickory-proto = "0.25"
 httparse = "1"
+hyper = { version = "1", features = ["client", "http1"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
+http-body-util = "0.1"
+[dev-dependencies]
+tower = { version = "0.5", features = ["util"] }
