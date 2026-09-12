@@ -58,11 +58,17 @@ workspace uses a separate toolchain/lockfile and is not part of this archive.
 
 ## Remaining Stages
 
+HY2 protocol milestone verified on Windows x64 against official Hysteria v2.6.4:
+all three oracle suites pass, including TCP/UDP, IPv4/IPv6, fragmentation,
+Salamander, two timed port hops, negotiated bandwidth, negative authentication
+and restart. The generic Quinn DATAGRAM cap patch has an independent test.
+ASan fuzzing exposed an address normalization assertion, now covered by a fixed
+regression; the final parser completed 653,100 inputs. See `hysteria2-protocol.md`.
+
 1. Finish extracting synthetic legacy compatibility vectors, remove Go product
    sources/build flows after Rust replacement is ready, and commit independently.
-2. Complete and validate HY2 authentication, TCP/UDP, fragmentation, IPv4/IPv6,
-   Salamander, hopping, bandwidth negotiation, error paths and reconnection against
-   a fixed official Hysteria release. Existing Rust code still needs this audit.
+2. HY2 protocol validation is complete for the documented oracle matrix. Continue
+   platform and full application integration acceptance below.
 3. Finish core resource/cancellation handling, live connection statistics, full
    API behavior, DNS cache/bootstrap/fake-IP edge cases, group/rule updates and
    compatibility regressions. Existing implementations are not full acceptance.

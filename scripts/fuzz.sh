@@ -5,11 +5,11 @@ cd "$(dirname "$0")/.."
 mkdir -p target/fuzz-logs
 targets=("$@")
 if [ "${#targets[@]}" -eq 0 ]; then
-    targets=(vless_frames xudp_frames vision_frames)
+    targets=(vless_frames xudp_frames vision_frames hysteria2_frames)
 fi
 for target in "${targets[@]}"; do
     case "$target" in
-        vless_frames|xudp_frames|vision_frames) ;;
+        vless_frames|xudp_frames|vision_frames|hysteria2_frames) ;;
         *) printf 'Unknown fuzz target: %s\n' "$target" >&2; exit 1 ;;
     esac
     log="target/fuzz-logs/$target.log"

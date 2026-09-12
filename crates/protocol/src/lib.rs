@@ -34,24 +34,43 @@ impl Target {
                 && !host.chars().any(|c| c.is_control() || c.is_whitespace()),
             "invalid target"
         );
+        let host = if let Ok(ip) = host.parse::<IpAddr>() {
+            ip.to_string()
+        } else {
+            ensure!(
+                !host
+                    .chars()
+                    .any(|c| matches!(c, ':' | '[' | ']' | '/' | '?' | '#' | '@')),
+                "invalid target host"
+            );
+            host
+        };
         Ok(Self { host, port })
     }
     pub fn parse(authority: &str) -> Result<Self> {
         if let Ok(addr) = authority.parse::<SocketAddr>() {
             return Self::new(addr.ip().to_string(), addr.port());
         }
-        let (host, port) = authority
-            .rsplit_once(':')
+        ensure!(
+            !authority.contains('@'),
+            "target cannot contain user information"
+        );
+        let authority: http::uri::Authority = authority.parse()?;
+        let port = authority
+            .port_u16()
             .ok_or_else(|| anyhow::anyhow!("target must be host:port"))?;
-        Self::new(
-            host.trim_start_matches('[').trim_end_matches(']'),
-            port.parse()?,
-        )
+        let host = authority.host();
+        ensure!(
+            !host.starts_with('['),
+            "bracketed target must be an IPv6 address"
+        );
+        Self::new(host, port)
     }
     pub fn ip(&self) -> Option<IpAddr> {
         self.host.parse().ok()
     }
 }
+
 impl fmt::Display for Target {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         if self.host.contains(':') {
@@ -104,5 +123,33 @@ impl AsyncWrite for SplitStream {
         cx: &mut std::task::Context<'_>,
     ) -> std::task::Poll<std::io::Result<()>> {
         AsyncWrite::poll_shutdown(Pin::new(&mut self.send), cx)
+    }
+}
+
+#[cfg(test)]
+mod target_tests {
+    use super::*;
+    #[test]
+    fn authorities_are_unambiguous_and_ips_canonical() {
+        assert_eq!(
+            Target::new("a::0", 54).unwrap(),
+            Target::parse("[a::]:54").unwrap()
+        );
+        for malformed in [
+            "a::0:54",
+            "host:0",
+            "user@host:80",
+            "host/path:80",
+            "[not-an-ip]:80",
+            "[::1]:65536",
+        ] {
+            assert!(Target::parse(malformed).is_err(), "{malformed}");
+        }
+        assert!(
+            crate::hysteria2::UdpMessage::decode(&[
+                1, 15, 4, 0, 4, 4, 5, 32, 6, 97, 58, 58, 48, 58, 53, 52, 58, 32, 1
+            ])
+            .is_err()
+        );
     }
 }

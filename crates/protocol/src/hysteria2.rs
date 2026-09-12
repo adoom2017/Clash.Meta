@@ -22,6 +22,7 @@ use std::{
     task::{Context as TaskContext, Poll},
     time::{Duration, Instant},
 };
+use tokio_util::task::AbortOnDropHandle;
 
 pub fn salamander_encode(key: &[u8], salt: [u8; 8], bytes: &[u8]) -> Vec<u8> {
     let mut hash = Blake2b::<U32>::new();
@@ -183,11 +184,17 @@ pub struct UdpMessage {
     pub payload: Vec<u8>,
 }
 impl UdpMessage {
-    pub fn encode(&self) -> Result<Vec<u8>> {
+    fn validate(&self) -> Result<()> {
         ensure!(
             self.count > 0 && self.fragment < self.count,
             "invalid HY2 fragments"
         );
+        ensure!(self.payload.len() <= 65507, "oversized HY2 datagram");
+        Target::new(&self.target.host, self.target.port)?;
+        Ok(())
+    }
+    pub fn encode(&self) -> Result<Vec<u8>> {
+        self.validate()?;
         let mut out = vec![];
         out.extend_from_slice(&self.session.to_be_bytes());
         out.extend_from_slice(&self.packet.to_be_bytes());
@@ -200,6 +207,7 @@ impl UdpMessage {
     }
     pub fn decode(bytes: &[u8]) -> Result<Self> {
         ensure!(bytes.len() >= 9, "short HY2 datagram");
+        ensure!(bytes.len() <= 66035, "oversized HY2 frame");
         let mut input = &bytes[8..];
         let n = take_varint(&mut input)? as usize;
         ensure!(n <= 512 && input.len() >= n, "bad HY2 address length");
@@ -212,10 +220,7 @@ impl UdpMessage {
             target,
             payload: input[n..].to_vec(),
         };
-        ensure!(
-            message.count > 0 && (message.count == 1 || message.fragment < message.count),
-            "bad HY2 fragment index"
-        );
+        message.validate()?;
         Ok(message)
     }
 }
@@ -224,19 +229,29 @@ struct Pending {
     target: Target,
     fragments: Vec<Option<Vec<u8>>>,
     size: usize,
+    permits: Vec<tokio::sync::OwnedSemaphorePermit>,
 }
-#[derive(Default)]
 pub struct Reassembler {
     pending: HashMap<(u32, u16), Pending>,
+    budget: Arc<tokio::sync::Semaphore>,
+}
+impl Default for Reassembler {
+    fn default() -> Self {
+        Self {
+            pending: HashMap::new(),
+            budget: Arc::new(tokio::sync::Semaphore::new(8 * 1024 * 1024)),
+        }
+    }
 }
 impl Reassembler {
     pub fn push(&mut self, message: UdpMessage) -> Result<Option<(Target, Vec<u8>)>> {
+        message.validate()?;
+        self.pending
+            .retain(|_, p| p.created.elapsed() < Duration::from_secs(5));
         if message.count == 1 {
             ensure!(message.payload.len() <= 65507, "oversized UDP packet");
             return Ok(Some((message.target, message.payload)));
         }
-        self.pending
-            .retain(|_, p| p.created.elapsed() < Duration::from_secs(5));
         let key = (message.session, message.packet);
         ensure!(
             self.pending.contains_key(&key) || self.pending.len() < 64,
@@ -247,13 +262,24 @@ impl Reassembler {
             target: message.target.clone(),
             fragments: vec![None; message.count as usize],
             size: 0,
+            permits: vec![],
         });
-        ensure!(
-            pending.target == message.target && pending.fragments.len() == message.count as usize,
-            "inconsistent fragments"
-        );
+        if pending.target != message.target || pending.fragments.len() != message.count as usize {
+            self.pending.remove(&key);
+            anyhow::bail!("inconsistent fragments");
+        }
         let slot = &mut pending.fragments[message.fragment as usize];
+        if slot.as_ref().is_some_and(|bytes| bytes != &message.payload) {
+            self.pending.remove(&key);
+            anyhow::bail!("conflicting duplicate fragment");
+        }
         if slot.is_none() {
+            let permit = self
+                .budget
+                .clone()
+                .try_acquire_many_owned(message.payload.len() as u32)
+                .context("HY2 connection fragment memory limit")?;
+            pending.permits.push(permit);
             pending.size += message.payload.len();
             *slot = Some(message.payload);
         }
@@ -274,14 +300,30 @@ impl Reassembler {
 }
 
 type SessionSenders = Arc<Mutex<HashMap<u32, tokio::sync::mpsc::Sender<Bytes>>>>;
+fn negotiated_rate(user: u64, server: &str) -> Result<u64> {
+    if server == "auto" {
+        return Ok(0);
+    }
+    let server = server
+        .parse::<u64>()
+        .context("invalid HY2 bandwidth response")?;
+    Ok(if user == 0 || server == 0 {
+        user
+    } else {
+        user.min(server)
+    })
+}
+
 pub struct Client {
     endpoint: quinn::Endpoint,
     connection: quinn::Connection,
-    driver: tokio::task::JoinHandle<()>,
+    driver: AbortOnDropHandle<()>,
     receiver: tokio::task::JoinHandle<()>,
     sessions: SessionSenders,
     next_session: AtomicU32,
     udp: bool,
+    send_rate: u64,
+    fragment_budget: Arc<tokio::sync::Semaphore>,
 }
 impl Drop for Client {
     fn drop(&mut self) {
@@ -304,8 +346,11 @@ impl Client {
         }
         .parse()?;
         let rate = Arc::new(AtomicU64::new(0));
+        let io = meta_platform::udp_bind(bind, hooks)?;
+        socket2::SockRef::from(&io).set_recv_buffer_size(2 * 1024 * 1024)?;
+        socket2::SockRef::from(&io).set_send_buffer_size(2 * 1024 * 1024)?;
         let socket = Arc::new(HySocket {
-            io: meta_platform::udp_bind(bind, hooks)?,
+            io,
             canonical: remote,
             ports: port_list(proxy)?,
             started: Instant::now(),
@@ -333,6 +378,7 @@ impl Client {
             .keep_alive_interval(Some(Duration::from_secs(10)))
             .max_idle_timeout(Some(Duration::from_secs(30).try_into()?))
             .datagram_receive_buffer_size(Some(2 * 1024 * 1024))
+            .datagram_max_frame_size(Some(1200))
             .max_concurrent_bidi_streams(0u32.into())
             .initial_mtu(1200)
             .mtu_discovery_config(None);
@@ -350,9 +396,12 @@ impl Client {
         .await??;
         let (mut h3_connection, mut requests) =
             h3::client::new(h3_quinn::Connection::new(connection.clone())).await?;
-        let driver = tokio::spawn(async move {
+        // This guard also runs when connect() is cancelled during authentication.
+        let keepalive = requests.clone();
+        let driver = AbortOnDropHandle::new(tokio::spawn(async move {
+            let _keepalive = keepalive;
             let _ = std::future::poll_fn(|cx| h3_connection.poll_close(cx)).await;
-        });
+        }));
         // Abort the HTTP/3 driver on any authentication failure.
         let authentication = async {
             let request = http::Request::builder()
@@ -387,16 +436,7 @@ impl Client {
                 .context("missing HY2 bandwidth negotiation")?
                 .to_str()?;
             let user_rate = proxy.up.as_deref().map(bandwidth).transpose()?.unwrap_or(0);
-            let cap = if server_rate == "auto" {
-                user_rate
-            } else {
-                let server_rate = server_rate.parse::<u64>()?;
-                match (user_rate, server_rate) {
-                    (0, b) => b,
-                    (a, 0) => a,
-                    (a, b) => a.min(b),
-                }
-            };
+            let cap = negotiated_rate(user_rate, server_rate)?;
             rate.store(cap, Ordering::Relaxed);
             Ok::<_, anyhow::Error>(udp)
         };
@@ -412,13 +452,6 @@ impl Client {
                 });
             }
         };
-        // Keep the request sender alive in the driver guard: dropping the last
-        // HTTP/3 sender initiates graceful close on some h3 versions.
-        let old_driver = driver;
-        let driver = tokio::spawn(async move {
-            let _requests = requests;
-            let _ = old_driver.await;
-        });
         let sessions: SessionSenders = Arc::new(Mutex::new(HashMap::new()));
         let table = sessions.clone();
         let conn = connection.clone();
@@ -442,12 +475,22 @@ impl Client {
             sessions,
             next_session: AtomicU32::new(rand::random()),
             udp,
+            send_rate: rate.load(Ordering::Relaxed),
+            fragment_budget: Arc::new(tokio::sync::Semaphore::new(8 * 1024 * 1024)),
         }))
     }
     pub fn is_closed(&self) -> bool {
         self.connection.close_reason().is_some()
     }
+    /// Negotiated bytes per second; zero uses QUIC congestion control alone.
+    pub fn send_rate(&self) -> u64 {
+        self.send_rate
+    }
     pub async fn tcp(&self, target: &Target) -> Result<SplitStream> {
+        tokio::time::timeout(Duration::from_secs(15), self.tcp_inner(target)).await?
+    }
+    async fn tcp_inner(&self, target: &Target) -> Result<SplitStream> {
+        Target::new(&target.host, target.port)?;
         let (mut send, mut recv) = self.connection.open_bi().await?;
         let mut header = vec![];
         put_varint(0x401, &mut header)?;
@@ -458,15 +501,16 @@ impl Client {
         send.write_all(&header).await?;
         let mut status = [0];
         recv.read_exact(&mut status).await?;
-        let _message = read_sized(&mut recv, 4096).await?;
+        let _message = read_sized(&mut recv, 2048).await?;
         let _padding = read_sized(&mut recv, 4096).await?;
         ensure!(status[0] == 0, "HY2 target connection rejected");
         Ok(SplitStream { send, recv })
     }
     pub fn udp(self: &Arc<Self>) -> Result<Arc<dyn Datagram>> {
         ensure!(self.udp, "HY2 server disabled UDP");
+        ensure!(!self.is_closed(), "HY2 connection closed");
         let mut table = self.sessions.lock().unwrap();
-        ensure!(table.len() < 4096, "HY2 session limit");
+        ensure!(table.len() < 256, "HY2 session limit");
         let mut id = self.next_session.fetch_add(1, Ordering::Relaxed);
         while table.contains_key(&id) {
             id = self.next_session.fetch_add(1, Ordering::Relaxed);
@@ -477,7 +521,14 @@ impl Client {
             client: self.clone(),
             id,
             packet: AtomicU32::new(0),
-            receive: tokio::sync::Mutex::new((rx, Reassembler::default())),
+            sending: tokio::sync::Mutex::new(()),
+            receive: tokio::sync::Mutex::new((
+                rx,
+                Reassembler {
+                    pending: HashMap::new(),
+                    budget: self.fragment_budget.clone(),
+                },
+            )),
         }))
     }
 }
@@ -485,6 +536,7 @@ struct UdpSession {
     client: Arc<Client>,
     id: u32,
     packet: AtomicU32,
+    sending: tokio::sync::Mutex<()>,
     receive: tokio::sync::Mutex<(tokio::sync::mpsc::Receiver<Bytes>, Reassembler)>,
 }
 impl Drop for UdpSession {
@@ -496,6 +548,8 @@ impl Drop for UdpSession {
 impl Datagram for UdpSession {
     async fn send(&self, target: &Target, bytes: &[u8]) -> Result<()> {
         ensure!(bytes.len() <= 65507, "UDP payload too large");
+        // Official peers retain one in-progress fragmented packet per session.
+        let _sending = self.sending.lock().await;
         let max = self
             .client
             .connection
@@ -567,6 +621,72 @@ mod tests {
             } else {
                 assert!(got.is_none());
             }
+        }
+    }
+
+    #[test]
+    fn fragment_validation_conflicts_expiry_and_shared_budget() {
+        let budget = Arc::new(tokio::sync::Semaphore::new(16));
+        let mut r = Reassembler {
+            pending: HashMap::new(),
+            budget: budget.clone(),
+        };
+        let mut message = UdpMessage {
+            session: 1,
+            packet: 1,
+            fragment: 0,
+            count: 2,
+            target: Target::new("example.org", 53).unwrap(),
+            payload: vec![1; 16],
+        };
+        assert!(r.push(message.clone()).unwrap().is_none());
+        assert_eq!(budget.available_permits(), 0);
+        assert!(r.push(message.clone()).unwrap().is_none());
+        message.payload[0] = 2;
+        assert!(r.push(message.clone()).is_err());
+        assert_eq!(budget.available_permits(), 16);
+        for (fragment, count) in [(0, 0), (1, 1), (2, 2), (255, 2)] {
+            message.fragment = fragment;
+            message.count = count;
+            assert!(r.push(message.clone()).is_err());
+            assert!(message.encode().is_err());
+        }
+        message.fragment = 0;
+        message.count = 2;
+        r.push(message.clone()).unwrap();
+        r.pending.get_mut(&(1, 1)).unwrap().created = Instant::now() - Duration::from_secs(6);
+        message.packet = 2;
+        r.push(message.clone()).unwrap();
+        let mut other = Reassembler {
+            pending: HashMap::new(),
+            budget: budget.clone(),
+        };
+        assert!(other.push(message).is_err());
+        drop(r);
+        assert_eq!(budget.available_permits(), 16);
+    }
+
+    #[test]
+    fn bandwidth_response_and_udp_golden_vector() {
+        assert_eq!(negotiated_rate(128000, "auto").unwrap(), 0);
+        assert_eq!(negotiated_rate(128000, "64000").unwrap(), 64000);
+        assert_eq!(negotiated_rate(128000, "0").unwrap(), 128000);
+        assert_eq!(negotiated_rate(0, "64000").unwrap(), 0);
+        assert!(negotiated_rate(128000, "NaN").is_err());
+        let message = UdpMessage {
+            session: 0x01020304,
+            packet: 0x0506,
+            fragment: 0,
+            count: 1,
+            target: Target::new("a", 53).unwrap(),
+            payload: vec![42],
+        };
+        assert_eq!(
+            message.encode().unwrap(),
+            b"\x01\x02\x03\x04\x05\x06\x00\x01\x04a:53*"
+        );
+        for end in 0..12 {
+            assert!(UdpMessage::decode(&message.encode().unwrap()[..end]).is_err());
         }
     }
 }

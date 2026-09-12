@@ -15,8 +15,16 @@ meta-protocol = { path = "../crates/protocol", features = ["fuzzing"] }
 [workspace]
 members = ["."]
 
+[[bin]]
+name = "hysteria2_frames"
+path = "fuzz_targets/hysteria2_frames.rs"
+test = false
+doc = false
+bench = false
+
 [patch.crates-io]
 rustls = { path = "../third-party/rustls" }
+quinn-proto = { path = "../third-party/quinn-proto" }
 
 [[bin]]
 name = "vless_frames"

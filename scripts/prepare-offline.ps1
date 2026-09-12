@@ -24,10 +24,10 @@ try {
         Copy-Item -LiteralPath (Join-Path $workspace $name) -Destination $snapshot -Recurse
     }
     New-Item -ItemType Directory -Path (Join-Path $snapshot 'scripts'), (Join-Path $snapshot 'docs'), (Join-Path $snapshot '.cargo') | Out-Null
-    foreach ($name in @('prepare-offline.ps1', 'verify-offline.ps1', 'test-vless.ps1')) {
+    foreach ($name in @('prepare-offline.ps1', 'verify-offline.ps1', 'test-vless.ps1', 'test-hysteria2.ps1')) {
         Copy-Item -LiteralPath (Join-Path $PSScriptRoot $name) -Destination (Join-Path $snapshot 'scripts')
     }
-    foreach ($name in @('rust-progress.md', 'vless-protocol.md', 'offline-build.md')) {
+    foreach ($name in @('rust-progress.md', 'vless-protocol.md', 'hysteria2-protocol.md', 'offline-build.md')) {
         Copy-Item -LiteralPath (Join-Path $workspace "docs/$name") -Destination (Join-Path $snapshot 'docs')
     }
 
@@ -60,7 +60,7 @@ offline = true
             license = $package.license
             license_file = if ($package.license_file) { Split-Path $package.license_file -Leaf } else { $null }
             sha256 = $checksum
-            local_patch = $package.name -eq 'rustls' -and -not $package.source
+            local_patch = $package.name -in @('rustls', 'quinn-proto') -and -not $package.source
         }
     }
     $revision = git rev-parse HEAD
