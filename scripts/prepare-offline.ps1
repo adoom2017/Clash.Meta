@@ -20,14 +20,14 @@ try {
         }
     }
 
-    foreach ($name in @('Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml', 'LICENSE', 'crates', 'third-party', 'examples')) {
+    foreach ($name in @('Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml', 'LICENSE', 'README.md', 'crates', 'third-party', 'examples')) {
         Copy-Item -LiteralPath (Join-Path $workspace $name) -Destination $snapshot -Recurse
     }
     New-Item -ItemType Directory -Path (Join-Path $snapshot 'scripts'), (Join-Path $snapshot 'docs'), (Join-Path $snapshot '.cargo') | Out-Null
-    foreach ($name in @('prepare-offline.ps1', 'verify-offline.ps1', 'test-vless.ps1', 'test-hysteria2.ps1')) {
+    foreach ($name in @('prepare-offline.ps1', 'verify-offline.ps1', 'verify-offline-linux.sh', 'test-vless.ps1', 'test-hysteria2.ps1', 'check-mobile.ps1', 'package-release.ps1')) {
         Copy-Item -LiteralPath (Join-Path $PSScriptRoot $name) -Destination (Join-Path $snapshot 'scripts')
     }
-    foreach ($name in @('rust-progress.md', 'vless-protocol.md', 'hysteria2-protocol.md', 'offline-build.md')) {
+    foreach ($name in @('rust-progress.md', 'vless-protocol.md', 'hysteria2-protocol.md', 'offline-build.md', 'core-runtime.md', 'platform-runtime.md', 'compatibility.md', 'release.md')) {
         Copy-Item -LiteralPath (Join-Path $workspace "docs/$name") -Destination (Join-Path $snapshot 'docs')
     }
 
@@ -82,6 +82,10 @@ offline = true
         $relative = [System.IO.Path]::GetRelativePath($snapshot, $file.FullName).Replace('\', '/')
         $files[$relative] = (Get-FileHash -LiteralPath $file.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
     }
+    $checksumLines = foreach ($name in $files.Keys) { "$($files[$name])  $name" }
+    $checksumPath = Join-Path $snapshot 'snapshot-files.sha256'
+    [System.IO.File]::WriteAllText($checksumPath, ($checksumLines -join "`n") + "`n", [System.Text.UTF8Encoding]::new($false))
+    $files['snapshot-files.sha256'] = (Get-FileHash -LiteralPath $checksumPath -Algorithm SHA256).Hash.ToLowerInvariant()
     $files | ConvertTo-Json -Depth 3 | Set-Content -LiteralPath (Join-Path $snapshot 'snapshot-files.json') -Encoding utf8NoBOM
     $archive = Join-Path $outputRoot "$snapshotName.tar.gz"
     tar -czf $archive -C $outputRoot $snapshotName

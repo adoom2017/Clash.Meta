@@ -1,7 +1,7 @@
 # Offline Source Snapshots
 
 The Rust source archive contains the workspace, its lockfile, the locally patched
-rustls source and licenses, and every registry source selected by `Cargo.lock`.
+rustls/Quinn sources and licenses, and every registry source selected by `Cargo.lock`.
 It does not include Go product code, external proxy executables or the separate
 fuzz workspace. Xray remains an optional, independently acquired test oracle.
 
@@ -17,7 +17,7 @@ the archive may use the network to obtain missing locked registry sources:
 The script writes a uniquely named source directory, `.tar.gz` and `.sha256`
 under the ignored `dist/` directory. It rejects non-crates.io registry and Git
 dependency sources. `dependency-inventory.json` records package versions,
-licenses, original registry archive checksums and the local rustls patch. The
+licenses, original registry archive checksums and both local foundation patches. The
 base Git revision and dirty status identify the checkout used; the per-file
 `snapshot-files.json` hashes bind the actual archived bytes, including local
 changes. Original license files stay with dependency sources.
@@ -62,8 +62,8 @@ Official Xray tests remain ignored unless a verified executable is supplied as
 described in `vless-protocol.md`. Fuzzing has its own lockfile and nightly toolchain
 and is intentionally not part of this production source archive.
 
-The repository also provides a Linux/WSL helper, outside the recorded archive,
-which checks the archive hash, extracts it into a new temporary directory and
+The repository also provides a Linux/WSL helper, included in current snapshots,
+which checks archive and individual file hashes, extracts into a temporary directory and
 runs the release build plus local tests with an empty cache:
 
 ```sh
@@ -74,7 +74,7 @@ It requires `sha256sum`, `tar`, Rust 1.93.1 and the host C/linker tools. Its log
 and host/executable hash record are retained beside the input archive. The
 archive's `.sha256` file uses LF so GNU `sha256sum --check` can consume it directly.
 
-## Recorded Verification
+## Initial VLESS Snapshot Verification
 
 On 2026-09-12:
 

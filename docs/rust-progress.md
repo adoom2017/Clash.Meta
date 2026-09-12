@@ -56,7 +56,7 @@ commands and the exact tested archive hash are in `docs/offline-build.md`.
 OS compiler/linker and Rust toolchain prerequisites are not bundled. The fuzz
 workspace uses a separate toolchain/lockfile and is not part of this archive.
 
-## Remaining Stages
+## Core, HY2 and Platform Milestones
 
 HY2 protocol milestone verified on Windows x64 against official Hysteria v2.6.4:
 all three oracle suites pass, including TCP/UDP, IPv4/IPv6, fragmentation,
@@ -76,25 +76,6 @@ limits; DoH uses Hyper with bounded bodies. Fake-IP exhaustion returns SERVFAIL
 without overflowing or reusing live mappings. Eight core tests and strict
 workspace Clippy pass on Windows. Full desktop/FFI acceptance remains below.
 
-1. Finish extracting synthetic legacy compatibility vectors, remove Go product
-   sources/build flows after Rust replacement is ready, and commit independently.
-2. HY2 protocol validation is complete for the documented oracle matrix. Continue
-   platform and full application integration acceptance below.
-3. Finish core resource/cancellation handling, live connection statistics, full
-   API behavior, DNS cache/bootstrap/fake-IP edge cases, group/rule updates and
-   compatibility regressions. Existing implementations are not full acceptance.
-4. Implement desktop TUN with a general device library and user-space network
-   stack, physical egress binding, exclusions, IPv4/IPv6 and network switching.
-   Record/restore routes and DNS, roll back partial startup and provide recovery.
-5. Implement versioned C ABI, handle/buffer/callback ownership, PacketIo host
-   integration, Android socket protection/TUN fd and iOS packet callbacks. Test
-   simulated host lifecycle and cross-build both arm64 targets.
-6. Complete Windows/macOS runtime tests, broader Linux checks, dependency audit,
-   per-release offline source snapshots, release packaging and compatibility/
-   platform documents. The initial Windows/Linux offline snapshot is verified;
-   macOS and mobile remain unverified. Cross-compilation does not count as platform
-   runtime testing.
-
 TUN and ABI v1 now have implementations: smoltcp session adaptation, tun-rs native
 devices, physical egress binding, split routes, recovery journal and network
 refresh; bounded host packet queues, Android fd duplication/protect callbacks and
@@ -103,6 +84,42 @@ rollback tests pass. Real Linux TUN TCP/UDP and route cleanup pass. Android arm6
 static/dynamic libraries build. Windows lacks administrator privileges/Wintun;
 macOS/iOS require a Mac/Xcode. These runtime/build checks remain unfulfilled.
 See `platform-runtime.md` for exact tests, commands and remaining limitations.
+
+## Engineering Replacement and Delivery
+
+- Synthetic Alpha AES-CFB golden vectors cover nine password boundaries; no Go
+  compiler is required for compatibility tests. Go product sources and old build/
+  release flows are removed. Rust desktop/mobile CI replaces the old workflows.
+- IPv6 HTTP forwarding, probes and DoH share strict authority parsing; HTTP
+  integration checks preserve IPv6 brackets and nondefault Host ports.
+- ABI size validation precedes full structure access. Callback lifecycle reentry
+  includes creation; Android fd mode explicitly rejects queue packet calls.
+- IPv6 UDP fragmentation now uses smoltcp wire/assembler primitives with 64
+  simultaneous packets, approximately 4 MiB storage, 30-second expiry and complete
+  datagram rejection on overlapping fragments. Native Linux TCP and 4,000-byte UDP
+  pass for both IP families, including route cleanup. Simulation covers malformed,
+  reordered, overlapping, expired and capacity-limited fragments.
+- The separate fuzz workspace lockfile includes the new platform foundations;
+  all four ASan fuzz targets build on pinned nightly-2026-08-01 in WSL.
+- Local desktop packages contain the executable, ABI libraries/header, dependency
+  licenses and hash manifest. Offline archives include all foundation sources,
+  both local patches, documentation and reproducible build/package scripts.
+  See `release.md` and `offline-build.md` for generated artifacts and verification.
+
+## Remaining Acceptance
+
+1. Windows 10/11 native Wintun: privileged full routing, DNS/fake-IP, direct
+   exclusions, no egress loop, network switching, failed startup and recovery.
+   Current Windows process is not administrator and Wintun is absent.
+2. macOS 12+ Intel/Apple Silicon: native utun with the same routing/DNS/lifecycle
+   matrix, plus release builds. No Mac is attached to this environment.
+3. iOS arm64 core/FFI compilation on macOS with Xcode/iPhoneOS SDK. Android arm64
+   release static/dynamic libraries already build with NDK 27.0.12077973/API 24.
+   Simulated C host tests do not constitute a mobile VPN app runtime test.
+4. Full desktop deployment matrix across physical interfaces, local DNS stubs,
+   other VPNs and network changes. Current route fault-injection and isolated Linux
+   native-route tests do not establish full default-route integration acceptance.
+
 The core must remain free of terminal interaction, process exit, system route
 commands and a global runtime. Final acceptance requires every first-release
 feature; partial milestones must not be presented as the completed rewrite.

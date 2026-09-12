@@ -17,6 +17,13 @@ export CARGO_NET_OFFLINE=true
 export PATH="$HOME/.cargo/bin:$PATH"
 mkdir -p "$CARGO_HOME" "$CARGO_TARGET_DIR"
 cd "$verification_root/$source_name"
+sha256sum --check --quiet snapshot-files.sha256
+expected_files=$(wc -l < snapshot-files.sha256)
+actual_files=$(find . -type f | wc -l)
+if [ "$actual_files" -ne "$((expected_files + 2))" ]; then
+    printf 'Snapshot file inventory does not match extracted source.\n' >&2
+    exit 1
+fi
 
 if ! rustup run 1.93.1 cargo build --workspace --release --locked --offline > "$archive.linux-build.log" 2>&1; then
     tail -n 80 "$archive.linux-build.log"

@@ -1,7 +1,13 @@
 #Requires -Version 7.0
-param([ValidateSet('android', 'ios')][string]$Platform, [string]$Ndk)
+param([Parameter(Mandatory)][ValidateSet('android', 'ios')][string]$Platform, [string]$Ndk, [switch]$Release)
 $ErrorActionPreference = 'Stop'
 $workspace = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
+$savedEnvironment = @{}
+foreach ($name in @('CC_aarch64_linux_android', 'CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER', 'AR_aarch64_linux_android', 'IPHONEOS_DEPLOYMENT_TARGET')) {
+    $savedEnvironment[$name] = [Environment]::GetEnvironmentVariable($name, 'Process')
+}
+$buildOptions = @('--locked', '--offline')
+if ($Release) { $buildOptions += '--release' }
 Push-Location $workspace
 try {
     if ($Platform -eq 'android') {
@@ -13,11 +19,19 @@ try {
         $env:CC_aarch64_linux_android = Join-Path $bin "aarch64-linux-android24-clang$suffix"
         $env:CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER = $env:CC_aarch64_linux_android
         $env:AR_aarch64_linux_android = Join-Path $bin $(if ($IsWindows) { 'llvm-ar.exe' } else { 'llvm-ar' })
-        cargo build -p meta-ffi --target aarch64-linux-android --locked --offline
+        foreach ($tool in @($env:CC_aarch64_linux_android, $env:AR_aarch64_linux_android)) {
+            if (-not (Test-Path -LiteralPath $tool -PathType Leaf)) { throw "Missing Android NDK tool: $tool" }
+        }
+        cargo build -p meta-ffi --target aarch64-linux-android @buildOptions
     } else {
         if (-not $IsMacOS) { throw 'iOS compilation requires macOS with Xcode and the iPhoneOS SDK.' }
         $env:IPHONEOS_DEPLOYMENT_TARGET = '12.0'
-        cargo build -p meta-ffi --target aarch64-apple-ios --locked --offline
+        cargo build -p meta-ffi --target aarch64-apple-ios @buildOptions
     }
     if ($LASTEXITCODE -ne 0) { throw 'Mobile core/FFI build failed.' }
-} finally { Pop-Location }
+} finally {
+    foreach ($name in $savedEnvironment.Keys) {
+        [Environment]::SetEnvironmentVariable($name, $savedEnvironment[$name], 'Process')
+    }
+    Pop-Location
+}
