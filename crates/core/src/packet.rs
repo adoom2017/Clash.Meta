@@ -331,8 +331,15 @@ pub(crate) async fn run(core: Arc<Core>, io: Arc<dyn PacketIo>) -> Result<()> {
         let mut ident = uuid::Uuid::new_v4().as_u128() as u32;
         while let Some(packet) = outgoing.recv().await {
             ident = ident.wrapping_add(1);
+            let frames = match ipv6::fragment(packet, mtu, ident) {
+                Ok(frames) => frames,
+                Err(error) => {
+                    tracing::debug!(%error, "dropping oversized or invalid TUN reply");
+                    continue;
+                }
+            };
             let send = async {
-                for frame in ipv6::fragment(packet, mtu, ident)? {
+                for frame in frames {
                     writer_io.send(&frame).await?;
                 }
                 Ok::<(), anyhow::Error>(())

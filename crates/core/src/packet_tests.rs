@@ -246,6 +246,33 @@ async fn packet_dns_hijack_returns_fake_ip_without_upstream() {
 }
 
 #[tokio::test]
+async fn oversized_ipv6_reply_does_not_stop_packet_delivery() {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        let (device, host_io) = pair();
+        let mut config = CoreConfig::default();
+        config.tun.enable = true;
+        let core = Core::new(config, Arc::new(meta_platform::DefaultHooks)).unwrap();
+        let running = core.start_with_packets(Some(device)).await.unwrap();
+        let socket = tokio::net::UdpSocket::bind("[::1]:0").await.unwrap();
+        let target = socket.local_addr().unwrap();
+        let oracle = tokio::spawn(async move {
+            let mut query = [0; 4];
+            let (_, peer) = socket.recv_from(&mut query).await.unwrap();
+            socket.send_to(&vec![1; 65500], peer).await.unwrap();
+            socket.send_to(b"pong", peer).await.unwrap();
+        });
+        assert_eq!(
+            client(host_io, target, b"ping".to_vec(), false).await,
+            b"pong"
+        );
+        oracle.await.unwrap();
+        running.shutdown().await;
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
 async fn udp_upload_does_not_cancel_a_partial_vless_response() {
     tokio::time::timeout(Duration::from_secs(5), async {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();

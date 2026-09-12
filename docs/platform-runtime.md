@@ -17,6 +17,8 @@ for 64 concurrent reassemblies, a 65,535-byte packet limit and 30-second expiry
 (approximately 4 MiB total). Overlapping fragments invalidate the whole datagram;
 atomic fragments remain independent. Generated oversized IPv6 UDP replies are
 fragmented to the configured MTU. IPv6 extension chains are bounded to eight.
+Oversized generated UDP replies are dropped without terminating packet delivery;
+a regression sends a 65,500-byte IPv6 UDP reply followed by a normal reply.
 
 ## Desktop
 

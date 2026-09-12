@@ -98,7 +98,8 @@ See `platform-runtime.md` for exact tests, commands and remaining limitations.
   simultaneous packets, approximately 4 MiB storage, 30-second expiry and complete
   datagram rejection on overlapping fragments. Native Linux TCP and 4,000-byte UDP
   pass for both IP families, including route cleanup. Simulation covers malformed,
-  reordered, overlapping, expired and capacity-limited fragments.
+  reordered, overlapping, expired and capacity-limited fragments. Oversized IPv6
+  UDP replies cannot terminate packet delivery; the next normal reply still passes.
 - The separate fuzz workspace lockfile includes the new platform foundations;
   all four ASan fuzz targets build on pinned nightly-2026-08-01 in WSL.
 - Local desktop packages contain the executable, ABI libraries/header, dependency
