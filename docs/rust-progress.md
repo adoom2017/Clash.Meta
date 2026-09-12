@@ -42,6 +42,20 @@ TLS/REALITY/Vision. SOCKS UDP removes closed outbound sessions so the next packe
 can reconnect. Three ASan/libFuzzer targets ran 20,669,305 inputs in WSL without a
 protocol crash. See `vless-protocol.md` for commands, limits and exact coverage.
 
+## Offline Source Milestone
+
+- [x] Locked registry source archive, dependency/license inventory and file hashes.
+- [x] Extracted archive builds with empty Cargo cache and target directories on
+  Windows x64 and Linux x64 (Ubuntu 22.04 WSL), Rust 1.93.1.
+- [x] Offline executable version/configuration checks on both hosts; Linux local
+  workspace tests: 34 passed, 2 official-oracle tests intentionally ignored.
+- [x] Changed source file rejected by checksum verification before compilation.
+
+`scripts/prepare-offline.ps1` creates the portable source archive; verification
+commands and the exact tested archive hash are in `docs/offline-build.md`.
+OS compiler/linker and Rust toolchain prerequisites are not bundled. The fuzz
+workspace uses a separate toolchain/lockfile and is not part of this archive.
+
 ## Remaining Stages
 
 1. Finish extracting synthetic legacy compatibility vectors, remove Go product
@@ -58,9 +72,11 @@ protocol crash. See `vless-protocol.md` for commands, limits and exact coverage.
 5. Implement versioned C ABI, handle/buffer/callback ownership, PacketIo host
    integration, Android socket protection/TUN fd and iOS packet callbacks. Test
    simulated host lifecycle and cross-build both arm64 targets.
-6. Complete Windows/macOS runtime tests, Linux checks, dependency audit, portable
-   offline source snapshots, release packaging, compatibility/platform documents
-   and test records. Cross-compilation does not count as platform runtime testing.
+6. Complete Windows/macOS runtime tests, broader Linux checks, dependency audit,
+   per-release offline source snapshots, release packaging and compatibility/
+   platform documents. The initial Windows/Linux offline snapshot is verified;
+   macOS and mobile remain unverified. Cross-compilation does not count as platform
+   runtime testing.
 
 TUN and FFI are not implemented yet. The CLI explicitly rejects `tun.enable`;
 this error is a temporary guard and does not satisfy the planned TUN deliverable.

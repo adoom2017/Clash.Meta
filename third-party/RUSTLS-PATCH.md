@@ -33,6 +33,12 @@ official Xray v25.9.11 tests passed on Windows x64, including the full REALITY
 handshake, wrong public key/SNI/short-id rejection and reconnection after a server
 restart. Exact coverage and binary checksums are in `docs/vless-protocol.md`.
 
-The copy is not a complete release dependency snapshot. Remaining workspace
-dependencies still require a populated Cargo cache until the offline-release
-packaging phase is implemented.
+Comparison with the checksum-verified upstream crate confirms changes in only
+the six source files listed above (34 inserted lines, one replaced line). The
+registry-generated `.cargo-ok` cache marker is not part of this source copy.
+
+This copy alone is not a complete dependency snapshot. Use
+`scripts/prepare-offline.ps1` to archive it together with the workspace's locked
+registry sources and their licenses/checksums. The resulting archive has passed
+empty-cache offline builds on Windows x64 and Linux x64; see
+`docs/offline-build.md` for the exact artifact and verification scope.

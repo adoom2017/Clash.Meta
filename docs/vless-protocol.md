@@ -80,7 +80,9 @@ reality-opts:
 ```
 
 Offline commands above use the existing local Cargo cache. They do not establish
-that a portable dependency snapshot or cross-platform release has been completed.
+offline source availability by themselves. A separately archived source snapshot
+has now passed empty-cache builds on Windows and Linux; see `offline-build.md`.
+This does not establish completion of the cross-platform release plan.
 
 Recorded on Windows x64, Rust 1.93.1, 2026-09-12:
 
