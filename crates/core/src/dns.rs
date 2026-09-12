@@ -60,6 +60,9 @@ impl Resolver {
     pub fn original(&self, ip: IpAddr) -> Option<String> {
         self.fake.lock().unwrap().by_ip.get(&ip).cloned()
     }
+    pub fn clear_cache(&self) {
+        *self.cache.lock().unwrap() = Cache::default();
+    }
     pub async fn lookup(&self, host: &str, port: u16) -> Result<Vec<SocketAddr>> {
         if let Ok(ip) = host.parse::<IpAddr>() {
             return Ok(vec![SocketAddr::new(ip, port)]);
@@ -314,7 +317,7 @@ impl Resolver {
             "[::]:0"
         }
         .parse()?;
-        let socket = meta_platform::udp_bind(bind, &*self.hooks)?;
+        let socket = meta_platform::udp_bind_for(bind, Some(addr), &*self.hooks)?;
         socket.connect(addr).await?;
         socket.send(&request.to_vec()?).await?;
         let mut bytes = vec![0; 65535];

@@ -415,6 +415,30 @@ impl Config {
             (1280..=9000).contains(&self.tun.mtu),
             "tun.mtu must be 1280..9000"
         );
+        ensure!(
+            !self.tun.enable || self.tun.auto_detect_interface || self.tun.interface.is_some(),
+            "tun.interface is required when auto-detect-interface is disabled"
+        );
+        ensure!(
+            !self.tun.device.is_empty()
+                && self.tun.device.len() <= 128
+                && !self.tun.device.chars().any(char::is_control),
+            "invalid tun.device"
+        );
+        ensure!(
+            self.tun.route_exclude_address.len() <= 1024,
+            "tun.route-exclude-address limit is 1024"
+        );
+        for (index, value) in self.tun.dns_hijack.iter().enumerate() {
+            let valid = if let Some(port) = value.strip_prefix("any:") {
+                port.parse::<u16>().is_ok_and(|p| p != 0)
+            } else {
+                value
+                    .parse::<std::net::SocketAddr>()
+                    .is_ok_and(|a| a.port() != 0)
+            };
+            ensure!(valid, "tun.dns-hijack[{index}] must be any:port or IP:port");
+        }
         for auth in &self.authentication {
             ensure!(
                 auth.split_once(':')

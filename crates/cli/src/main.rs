@@ -5,7 +5,10 @@ use base64::{Engine, engine::general_purpose::STANDARD};
 use clap::{Parser, ValueEnum};
 use meta_config::{Config, crypto};
 use meta_core::Core;
-use meta_platform::DefaultHooks;
+use meta_platform::{
+    DefaultHooks,
+    desktop::{DesktopTun, Options},
+};
 use std::{
     ffi::OsString,
     fs::{File, OpenOptions},
@@ -27,6 +30,9 @@ enum Action {
 #[derive(Parser)]
 #[command(name = "meta-rust", version, disable_version_flag = true)]
 struct Args {
+    /// Restore routes from the interrupted TUN session in the configuration directory.
+    #[arg(long, conflicts_with_all = ["action", "test"])]
+    recover_tun: bool,
     /// Show version and exit.
     #[arg(short = 'v', long, action = clap::ArgAction::Version)]
     version: Option<bool>,
@@ -184,6 +190,9 @@ fn write_output(args: &Args, action: Action, bytes: &[u8]) -> Result<()> {
 }
 
 fn run(mut args: Args) -> Result<()> {
+    if args.recover_tun {
+        return meta_platform::desktop::recover(&args.directory);
+    }
     if args.action.is_some() && args.config.is_some() {
         ensure!(
             args.output.is_some(),
@@ -220,32 +229,49 @@ fn run(mut args: Args) -> Result<()> {
         config.secret = secret;
     }
     config.validate()?;
-    ensure!(
-        !config.tun.enable,
-        "TUN packet processing is not implemented; disable tun.enable to use proxy listeners"
-    );
     if args.test {
         println!("Configuration test successful");
         return Ok(());
     }
     ensure!(
         config.port != 0
+            || config.tun.enable
             || config.socks_port != 0
             || config.mixed_port != 0
             || config.dns.enable
             || config.external_controller.is_some(),
         "no listeners enabled in configuration"
     );
-    let core = Core::new(config, Arc::new(DefaultHooks))?;
-    logging::init(&core.config.log, &args.directory, core.events.clone())?;
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?;
     runtime.block_on(async {
-        let running = core.start().await.context("cannot start proxy core")?;
+        let mut desktop = if config.tun.enable {
+            Some(DesktopTun::open(Options { name: &config.tun.device, mtu: config.tun.mtu, ipv6: config.ipv6, auto_route: config.tun.auto_route, interface: config.tun.interface.as_deref(), exclusions: &config.tun.route_exclude_address, capture_dns: !config.tun.dns_hijack.is_empty(), directory: &args.directory })?)
+        } else { None };
+        let hooks: meta_platform::Hooks = desktop.as_ref().map(|d| d.hooks.clone() as meta_platform::Hooks).unwrap_or_else(|| Arc::new(DefaultHooks));
+        let packets = desktop.as_ref().map(|d| d.device.clone() as Arc<dyn meta_platform::PacketIo>);
+        let core = Core::new(config, hooks)?;
+        logging::init(&core.config.log, &args.directory, core.events.clone())?;
+        let running = core.start_with_packets(packets).await.context("cannot start proxy core")?;
         tracing::info!(addresses = ?running.addresses, "proxy core started");
-        let result = shutdown_signal().await;
+        let mut refresh = tokio::time::interval(std::time::Duration::from_secs(3));
+        let signal = shutdown_signal(); tokio::pin!(signal);
+        let result = loop {
+            tokio::select! {
+                result = &mut signal => break result,
+                _ = core.stop.cancelled() => break Err(anyhow::anyhow!("proxy core stopped unexpectedly")),
+                _ = refresh.tick(), if desktop.is_some() => {
+                    match desktop.as_mut().unwrap().refresh() {
+                        Ok(true) => { core.network_changed().await; tracing::info!("physical egress changed; sessions closed for reconnect"); },
+                        Ok(false) => {},
+                        Err(error) => break Err(error.context("cannot update TUN routing")),
+                    }
+                },
+            }
+        };
         running.shutdown().await;
+        if let Some(desktop) = &mut desktop { desktop.restore()?; }
         tracing::info!("proxy core stopped");
         result
     })

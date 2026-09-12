@@ -11,3 +11,8 @@ meta-config.workspace = true
 meta-platform.workspace = true
 tokio.workspace = true
 serde_json.workspace = true
+anyhow.workspace = true
+async-trait.workspace = true
+socket2.workspace = true
+[dev-dependencies]
+smoltcp = { version = "=0.12.0", default-features = false, features = ["std", "medium-ip", "proto-ipv4", "socket-icmp"] }

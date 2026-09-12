@@ -346,7 +346,7 @@ impl Client {
         }
         .parse()?;
         let rate = Arc::new(AtomicU64::new(0));
-        let io = meta_platform::udp_bind(bind, hooks)?;
+        let io = meta_platform::udp_bind_for(bind, Some(remote), hooks)?;
         socket2::SockRef::from(&io).set_recv_buffer_size(2 * 1024 * 1024)?;
         socket2::SockRef::from(&io).set_send_buffer_size(2 * 1024 * 1024)?;
         let socket = Arc::new(HySocket {

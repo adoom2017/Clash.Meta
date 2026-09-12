@@ -2,6 +2,7 @@
 mod api;
 pub mod dns;
 mod inbound;
+mod packet;
 #[cfg(test)]
 mod tests;
 mod traffic;
@@ -124,6 +125,16 @@ impl Core {
         }))
     }
     pub async fn start(self: &Arc<Self>) -> Result<Running> {
+        self.start_with_packets(None).await
+    }
+    pub async fn start_with_packets(
+        self: &Arc<Self>,
+        packets: Option<Arc<dyn meta_platform::PacketIo>>,
+    ) -> Result<Running> {
+        ensure!(
+            self.config.tun.enable == packets.is_some(),
+            "tun.enable requires a host PacketIo; disable TUN for listener-only operation"
+        );
         {
             let mut started = self.lifecycle.lock().unwrap();
             ensure!(
@@ -132,16 +143,28 @@ impl Core {
             );
             *started = true;
         }
-        let result = self.start_inner().await;
+        let result = self.start_inner(packets).await;
         if result.is_err() {
             self.stop.cancel();
             *self.lifecycle.lock().unwrap() = false;
         }
         result
     }
-    async fn start_inner(self: &Arc<Self>) -> Result<Running> {
+    async fn start_inner(
+        self: &Arc<Self>,
+        packets: Option<Arc<dyn meta_platform::PacketIo>>,
+    ) -> Result<Running> {
         let mut tasks = JoinSet::new();
         let mut addresses = vec![];
+        if let Some(packets) = packets {
+            let core = self.clone();
+            tasks.spawn(async move {
+                if let Err(error) = packet::run(core.clone(), packets).await {
+                    tracing::error!(%error, "packet interface stopped");
+                }
+                core.stop.cancel();
+            });
+        }
         let ip = if self.config.allow_lan {
             self.config.bind_address.parse()?
         } else {
@@ -474,7 +497,7 @@ impl Core {
                 "[::]:0"
             }
             .parse()?;
-            let socket = meta_platform::udp_bind(bind, &*self.hooks)?;
+            let socket = meta_platform::udp_bind_for(bind, Some(remote), &*self.hooks)?;
             socket.connect(remote).await?;
             return Ok(Arc::new(DirectUdp {
                 socket,
@@ -562,6 +585,15 @@ impl Core {
         if let Some(c) = self.connections.lock().unwrap().get(id) {
             c.snapshot().cancel.cancel();
         }
+    }
+    pub async fn network_changed(&self) {
+        for connection in self.connections() {
+            connection.cancel.cancel();
+        }
+        for client in self.hy2.values() {
+            client.lock().await.take();
+        }
+        self.resolver.clear_cache();
     }
     pub async fn probe(&self, name: &str, url: &str, timeout: Duration) -> Result<u64> {
         let start = Instant::now();

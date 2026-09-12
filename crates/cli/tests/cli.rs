@@ -28,7 +28,11 @@ fn version_stdin_and_unknown_configuration() {
     for (input, valid) in [
         ("mixed-port: 7890\n", true),
         ("proxy-providers: {}\n", false),
-        ("tun:\n  enable: true\n", false),
+        ("tun:\n  enable: true\n", true),
+        (
+            "tun:\n  enable: true\n  auto-detect-interface: false\n",
+            false,
+        ),
     ] {
         let mut child = command()
             .args(["-f", "-", "-t"])

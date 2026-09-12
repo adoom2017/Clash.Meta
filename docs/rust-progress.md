@@ -95,8 +95,14 @@ workspace Clippy pass on Windows. Full desktop/FFI acceptance remains below.
    macOS and mobile remain unverified. Cross-compilation does not count as platform
    runtime testing.
 
-TUN and FFI are not implemented yet. The CLI explicitly rejects `tun.enable`;
-this error is a temporary guard and does not satisfy the planned TUN deliverable.
+TUN and ABI v1 now have implementations: smoltcp session adaptation, tun-rs native
+devices, physical egress binding, split routes, recovery journal and network
+refresh; bounded host packet queues, Android fd duplication/protect callbacks and
+checked lifecycle handles. Simulated TCP/UDP/IPv4/IPv6, DNS, C host and route
+rollback tests pass. Real Linux TUN TCP/UDP and route cleanup pass. Android arm64
+static/dynamic libraries build. Windows lacks administrator privileges/Wintun;
+macOS/iOS require a Mac/Xcode. These runtime/build checks remain unfulfilled.
+See `platform-runtime.md` for exact tests, commands and remaining limitations.
 The core must remain free of terminal interaction, process exit, system route
 commands and a global runtime. Final acceptance requires every first-release
 feature; partial milestones must not be presented as the completed rewrite.
