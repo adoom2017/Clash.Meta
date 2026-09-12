@@ -24,5 +24,7 @@ vendor
 # test suite
 test/config/cache*
 /output
+/target/
+/dist/
 .vscode/
 .fleet/

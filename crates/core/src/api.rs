@@ -1,0 +1,177 @@
+use crate::Core;
+use axum::{
+    Json, Router,
+    extract::{Path, Query, State, WebSocketUpgrade, ws::Message},
+    http::{Request, StatusCode},
+    middleware::{self, Next},
+    response::{IntoResponse, Response},
+    routing::{delete, get},
+};
+use serde_json::{Value, json};
+use std::{
+    sync::{Arc, atomic::Ordering},
+    time::Duration,
+};
+
+type ApiResult = Result<Json<Value>, (StatusCode, Json<Value>)>;
+fn error(err: impl std::fmt::Display) -> (StatusCode, Json<Value>) {
+    (
+        StatusCode::BAD_REQUEST,
+        Json(json!({"message":err.to_string()})),
+    )
+}
+pub fn router(core: Arc<Core>) -> Router {
+    Router::new()
+        .route(
+            "/version",
+            get(|| async {
+                Json(json!({"version":env!("CARGO_PKG_VERSION"),"meta":true,"name":"meta-rust"}))
+            }),
+        )
+        .route("/configs", get(config).patch(update))
+        .route("/proxies", get(proxies))
+        .route("/proxies/{name}", get(proxy).put(select))
+        .route("/proxies/{name}/delay", get(delay))
+        .route("/connections", get(connections).delete(close_all))
+        .route("/connections/{id}", delete(close))
+        .route("/traffic", get(traffic))
+        .route("/logs", get(logs))
+        .layer(middleware::from_fn_with_state(core.clone(), authorize))
+        .with_state(core)
+}
+async fn authorize(
+    State(core): State<Arc<Core>>,
+    request: Request<axum::body::Body>,
+    next: Next,
+) -> Response {
+    if !core.config.secret.is_empty() {
+        let expected = format!("Bearer {}", core.config.secret);
+        let got = request
+            .headers()
+            .get("authorization")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        let mut diff = got.len() ^ expected.len();
+        for (a, b) in got.bytes().zip(expected.bytes()) {
+            diff |= (a ^ b) as usize;
+        }
+        if diff != 0 {
+            return (
+                StatusCode::UNAUTHORIZED,
+                Json(json!({"message":"unauthorized"})),
+            )
+                .into_response();
+        }
+    }
+    next.run(request).await
+}
+async fn config(State(core): State<Arc<Core>>) -> Json<Value> {
+    let mut value = serde_json::to_value(&core.config).unwrap();
+    value["mode"] = serde_json::to_value(&core.policy.read().unwrap().mode).unwrap();
+    Json(value)
+}
+async fn update(State(core): State<Arc<Core>>, Json(value): Json<Value>) -> ApiResult {
+    let object = value.as_object().ok_or_else(|| error("expected object"))?;
+    for key in object.keys() {
+        if key != "mode" && key != "rules" {
+            return Err(error(
+                "only mode/rules support online updates; restart for full configuration",
+            ));
+        }
+    }
+    let mode = value
+        .get("mode")
+        .map(|m| serde_json::from_value(m.clone()))
+        .transpose()
+        .map_err(error)?;
+    if let Some(rules) = value.get("rules") {
+        core.replace_rules(serde_json::from_value(rules.clone()).map_err(error)?)
+            .map_err(error)?;
+    }
+    if let Some(mode) = mode {
+        core.set_mode(mode);
+    }
+    Ok(Json(json!({})))
+}
+fn proxy_map(core: &Core) -> serde_json::Map<String, Value> {
+    let policy = core.policy.read().unwrap();
+    let mut output = serde_json::Map::new();
+    for name in ["DIRECT", "REJECT"] {
+        output.insert(
+            name.into(),
+            json!({"name":name,"type":name,"udp":true,"history":[]}),
+        );
+    }
+    for p in &core.config.proxies {
+        output.insert(p.name.clone(),json!({"name":p.name,"type":match p.kind{meta_config::ProxyKind::Vless=>"VLESS",meta_config::ProxyKind::Hysteria2=>"Hysteria2"},"udp":p.udp,"history":policy.delay.get(&p.name).map(|d|vec![json!({"delay":d})]).unwrap_or_default()}));
+    }
+    for g in &core.config.proxy_groups {
+        output.insert(g.name.clone(),json!({"name":g.name,"type":if g.kind==meta_config::GroupKind::Select{"Selector"}else{"URLTest"},"all":g.proxies,"now":policy.selection.get(&g.name),"history":[]}));
+    }
+    output
+}
+async fn proxies(State(core): State<Arc<Core>>) -> Json<Value> {
+    Json(json!({"proxies":proxy_map(&core)}))
+}
+async fn proxy(State(core): State<Arc<Core>>, Path(name): Path<String>) -> ApiResult {
+    proxy_map(&core)
+        .remove(&name)
+        .map(Json)
+        .ok_or_else(|| error("proxy not found"))
+}
+async fn select(
+    State(core): State<Arc<Core>>,
+    Path(group): Path<String>,
+    Json(value): Json<Value>,
+) -> ApiResult {
+    core.select(
+        &group,
+        value
+            .get("name")
+            .and_then(Value::as_str)
+            .ok_or_else(|| error("name required"))?,
+    )
+    .map_err(error)?;
+    Ok(Json(json!({})))
+}
+async fn delay(
+    State(core): State<Arc<Core>>,
+    Path(name): Path<String>,
+    Query(query): Query<std::collections::HashMap<String, String>>,
+) -> ApiResult {
+    let timeout = query
+        .get("timeout")
+        .and_then(|s| s.parse::<u64>().ok())
+        .unwrap_or(5000)
+        .clamp(100, 30000);
+    let url = query
+        .get("url")
+        .map(String::as_str)
+        .unwrap_or("https://www.gstatic.com/generate_204");
+    let delay = core
+        .probe(&name, url, Duration::from_millis(timeout))
+        .await
+        .map_err(error)?;
+    Ok(Json(json!({"delay":delay})))
+}
+async fn connections(State(core): State<Arc<Core>>) -> Json<Value> {
+    Json(
+        json!({"uploadTotal":core.upload.load(Ordering::Relaxed),"downloadTotal":core.download.load(Ordering::Relaxed),"connections":core.connections()}),
+    )
+}
+async fn close(State(core): State<Arc<Core>>, Path(id): Path<String>) -> Json<Value> {
+    core.close_connection(&id);
+    Json(json!({}))
+}
+async fn close_all(State(core): State<Arc<Core>>) -> Json<Value> {
+    for c in core.connections() {
+        c.cancel.cancel();
+    }
+    Json(json!({}))
+}
+async fn traffic(State(core): State<Arc<Core>>, ws: WebSocketUpgrade) -> Response {
+    ws.on_upgrade(move|mut socket|async move{let(mut up,mut down)=(core.upload.load(Ordering::Relaxed),core.download.load(Ordering::Relaxed));let mut tick=tokio::time::interval(Duration::from_secs(1));loop{tokio::select!{_=core.stop.cancelled()=>break,_=tick.tick()=>{let(u,d)=(core.upload.load(Ordering::Relaxed),core.download.load(Ordering::Relaxed));if socket.send(Message::Text(json!({"up":u.saturating_sub(up),"down":d.saturating_sub(down)}).to_string().into())).await.is_err(){break;}(up,down)=(u,d);},_=socket.recv()=>break}}})
+}
+async fn logs(State(core): State<Arc<Core>>, ws: WebSocketUpgrade) -> Response {
+    ws.on_upgrade(move|mut socket|async move{let mut events=core.events.subscribe();loop{tokio::select!{_=core.stop.cancelled()=>break,event=events.recv()=>{match event{Ok(event)=>{if socket.send(Message::Text(event.into())).await.is_err(){break;}},Err(tokio::sync::broadcast::error::RecvError::Lagged(_))=>continue,Err(_)=>break}},_=socket.recv()=>break}}})
+}
