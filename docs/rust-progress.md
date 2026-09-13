@@ -4,6 +4,10 @@ This records the user-approved plan and remaining work so later sessions can
 continue from repository state. Work is on `meta-rust`; do not modify `Alpha` or
 push/publish automatically. Prioritize VLESS before completing the remaining plan.
 
+Latest checkpoint: [handoff.md](handoff.md), 2026-09-13. It records exact commits,
+artifacts and interrupted final verification steps. Consult it before continuing;
+the final oversized-UDP fix is newer than the last fully verified release package.
+
 ## Scope and Boundaries
 
 Deliver the Rust core, CLI, reduced Clash API, Windows Wintun and macOS utun;
