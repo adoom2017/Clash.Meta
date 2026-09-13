@@ -25,12 +25,57 @@ pub struct Network {
     pub dns_servers: Vec<IpAddr>,
 }
 
+#[cfg(windows)]
+fn interface_metric(index: u32, ipv6: bool) -> Result<u32> {
+    use windows_sys::Win32::{
+        NetworkManagement::IpHelper::{
+            GetIpInterfaceEntry, InitializeIpInterfaceEntry, MIB_IPINTERFACE_ROW,
+        },
+        Networking::WinSock::{AF_INET, AF_INET6},
+    };
+    let mut row = MIB_IPINTERFACE_ROW::default();
+    // Initialize/query only: this does not change interface configuration.
+    unsafe { InitializeIpInterfaceEntry(&mut row) };
+    row.InterfaceIndex = index;
+    row.Family = if ipv6 { AF_INET6 } else { AF_INET };
+    let result = unsafe { GetIpInterfaceEntry(&mut row) };
+    if result != 0 {
+        return Err(std::io::Error::from_raw_os_error(result as i32).into());
+    }
+    Ok(row.Metric)
+}
+
+#[cfg(windows)]
+fn order_windows_routes(routes: &mut Vec<Route>, mut metric: impl FnMut(u32, bool) -> Option<u32>) {
+    let mut ordered: Vec<_> = routes
+        .drain(..)
+        .filter_map(|route| {
+            let interface = metric(route.if_index()?, route.destination().is_ipv6())?;
+            let cost = u64::from(route.metric()?) + u64::from(interface);
+            Some((cost, route))
+        })
+        .collect();
+    ordered.sort_by_key(|(cost, _)| *cost);
+    routes.extend(ordered.into_iter().map(|(_, route)| route));
+}
+
 pub fn discover(interface: Option<&str>, excluded_index: Option<u32>) -> Result<Network> {
     let interfaces = netdev::get_interfaces();
     let mut routes = RouteManager::new()?.list()?;
     routes.retain(|r| r.prefix() == 0 && r.if_index() != excluded_index);
+    #[cfg(windows)]
+    order_windows_routes(&mut routes, |index, ipv6| {
+        match interface_metric(index, ipv6) {
+            Ok(metric) => Some(metric),
+            Err(error) => {
+                tracing::debug!(index, ipv6, %error, "skipping unavailable egress interface");
+                None
+            }
+        }
+    });
+    #[cfg(not(windows))]
     routes.sort_by_key(|r| {
-        #[cfg(any(windows, target_os = "linux"))]
+        #[cfg(target_os = "linux")]
         {
             r.metric().unwrap_or(u32::MAX)
         }
@@ -473,6 +518,43 @@ pub fn recover(directory: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(windows)]
+    #[test]
+    fn windows_route_order_includes_family_specific_interface_metrics() {
+        let a = Route::new("0.0.0.0".parse().unwrap(), 0)
+            .with_if_index(1)
+            .with_metric(1);
+        let b = Route::new("0.0.0.0".parse().unwrap(), 0)
+            .with_if_index(2)
+            .with_metric(20);
+        let v6 = Route::new("::".parse().unwrap(), 0)
+            .with_if_index(1)
+            .with_metric(1);
+        let missing = Route::new("::".parse().unwrap(), 0)
+            .with_if_index(3)
+            .with_metric(0);
+        let large = Route::new("::".parse().unwrap(), 0)
+            .with_if_index(2)
+            .with_metric(u32::MAX);
+        let mut routes = vec![a.clone(), b.clone(), missing, large.clone(), v6.clone()];
+        order_windows_routes(&mut routes, |index, ipv6| match (index, ipv6) {
+            (1, false) => Some(100),
+            (1, true) => Some(2),
+            (2, _) => Some(5),
+            _ => None,
+        });
+        assert_eq!(routes, vec![v6, b, a, large]);
+    }
+    #[cfg(windows)]
+    #[test]
+    fn windows_interface_metric_query_uses_live_os_interface() {
+        let loopback = netdev::get_interfaces()
+            .into_iter()
+            .find(|i| i.is_loopback())
+            .unwrap();
+        assert!(interface_metric(loopback.index, false).is_ok());
+        assert!(interface_metric(u32::MAX, false).is_err());
+    }
     #[derive(Default)]
     struct MemoryRoutes {
         routes: Vec<Route>,

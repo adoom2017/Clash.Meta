@@ -19,4 +19,4 @@ tun-rs = { version = "=2.8.9", features = ["async_tokio"] }
 route_manager = "=0.2.9"
 netdev = { version = "=0.46.2", default-features = false, features = ["gateway", "apple-system-configuration-extra"] }
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.61", features = ["Win32_Networking_WinSock"] }
+windows-sys = { version = "0.61", features = ["Win32_Networking_WinSock", "Win32_NetworkManagement_IpHelper", "Win32_NetworkManagement_Ndis"] }
