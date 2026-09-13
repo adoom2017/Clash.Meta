@@ -8,8 +8,9 @@ Current work ledger: [continuation.md](continuation.md). Each completed item is
 recorded there before moving to the next item.
 
 Baseline checkpoint: [handoff.md](handoff.md), 2026-09-13. It records exact commits,
-artifacts and interrupted final verification steps. Consult it before continuing;
-the final oversized-UDP fix is newer than the last fully verified release package.
+artifacts and interrupted final verification steps. The continuation ledger now
+records a verified Windows package including the oversized-UDP fix, plus tested
+Windows route-metric and HY2 network-cancellation fixes awaiting a new snapshot.
 
 ## Scope and Boundaries
 

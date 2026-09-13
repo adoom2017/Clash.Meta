@@ -30,7 +30,8 @@ pub struct Core {
     pub resolver: Arc<dns::Resolver>,
     hooks: Hooks,
     policy: RwLock<Policy>,
-    hy2: HashMap<String, tokio::sync::Mutex<Option<Arc<meta_protocol::hysteria2::Client>>>>,
+    hy2: HashMap<String, tokio::sync::Mutex<Option<Hy2Connection>>>,
+    network: Mutex<CancellationToken>,
     pub stop: CancellationToken,
     connections: Mutex<HashMap<String, Arc<traffic::State>>>,
     pub upload: AtomicU64,
@@ -38,6 +39,10 @@ pub struct Core {
     slots: Arc<tokio::sync::Semaphore>,
     lifecycle: Mutex<bool>,
     pub events: tokio::sync::broadcast::Sender<String>,
+}
+struct Hy2Connection {
+    client: Arc<meta_protocol::hysteria2::Client>,
+    network: CancellationToken,
 }
 struct Policy {
     mode: Mode,
@@ -115,6 +120,7 @@ impl Core {
             hooks,
             policy: RwLock::new(policy),
             hy2,
+            network: Mutex::new(CancellationToken::new()),
             stop: CancellationToken::new(),
             connections: Default::default(),
             upload: AtomicU64::new(0),
@@ -388,6 +394,19 @@ impl Core {
         &self,
         proxy: &meta_config::Proxy,
     ) -> Result<Arc<meta_protocol::hysteria2::Client>> {
+        let network = self.network.lock().unwrap().clone();
+        tokio::select! {
+            biased;
+            _ = self.stop.cancelled() => bail!("core stopped"),
+            _ = network.cancelled() => bail!("network changed during HY2 connection"),
+            result = self.hy2_on_network(proxy, network.clone()) => result,
+        }
+    }
+    async fn hy2_on_network(
+        &self,
+        proxy: &meta_config::Proxy,
+        network: CancellationToken,
+    ) -> Result<Arc<meta_protocol::hysteria2::Client>> {
         let mut cached = self
             .hy2
             .get(&proxy.name)
@@ -395,10 +414,12 @@ impl Core {
             .lock()
             .await;
         if let Some(client) = cached.as_ref()
-            && !client.is_closed()
+            && !client.network.is_cancelled()
+            && !client.client.is_closed()
         {
-            return Ok(client.clone());
+            return Ok(client.client.clone());
         }
+        cached.take();
         let remote = self
             .resolver
             .lookup(&proxy.server, proxy.port)
@@ -407,7 +428,14 @@ impl Core {
             .next()
             .context("no HY2 server address")?;
         let client = meta_protocol::hysteria2::Client::connect(proxy, remote, &*self.hooks).await?;
-        *cached = Some(client.clone());
+        ensure!(
+            !network.is_cancelled(),
+            "network changed during HY2 connection"
+        );
+        *cached = Some(Hy2Connection {
+            client: client.clone(),
+            network,
+        });
         Ok(client)
     }
     async fn vless_stream(
@@ -587,11 +615,22 @@ impl Core {
         }
     }
     pub async fn network_changed(&self) {
+        {
+            let mut network = self.network.lock().unwrap();
+            network.cancel();
+            *network = CancellationToken::new();
+        }
         for connection in self.connections() {
             connection.cancel.cancel();
         }
         for client in self.hy2.values() {
-            client.lock().await.take();
+            // Establishment owns this lock until cancellation is observed. Do not
+            // wait for it, or discard a connection made on the new network.
+            if let Ok(mut cached) = client.try_lock()
+                && cached.as_ref().is_some_and(|c| c.network.is_cancelled())
+            {
+                cached.take();
+            }
         }
         self.resolver.clear_cache();
     }

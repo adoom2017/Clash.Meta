@@ -2,6 +2,70 @@ use super::*;
 use tokio::io::AsyncReadExt;
 use tower::ServiceExt;
 
+#[tokio::test]
+async fn network_change_cancels_pending_hy2_and_allows_new_attempt() {
+    let blackhole = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let config = Config::parse(format!(
+        "proxies:\n- name: hy2\n  type: hysteria2\n  server: 127.0.0.1\n  port: {}\n  password: test\n  sni: localhost\nrules: ['MATCH,hy2']\n",
+        blackhole.local_addr().unwrap().port()
+    ).as_bytes()).unwrap();
+    let core = Core::new(config, Arc::new(meta_platform::DefaultHooks)).unwrap();
+    let proxy = &core.config.proxies[0];
+    let first = core.hy2(proxy);
+    tokio::pin!(first);
+    let mut packet = [0; 2048];
+    tokio::select! {
+        result = &mut first => panic!("handshake unexpectedly completed: {}", result.is_ok()),
+        result = tokio::time::timeout(Duration::from_secs(3), blackhole.recv(&mut packet)) => {
+            assert!(result.unwrap().unwrap() > 0);
+        }
+    }
+    let waiter = core.hy2(proxy);
+    tokio::pin!(waiter);
+    assert!(
+        tokio::time::timeout(Duration::from_millis(20), &mut waiter)
+            .await
+            .is_err()
+    );
+    tokio::time::timeout(Duration::from_secs(1), core.network_changed())
+        .await
+        .unwrap();
+    for result in [
+        tokio::time::timeout(Duration::from_secs(1), first)
+            .await
+            .unwrap(),
+        tokio::time::timeout(Duration::from_secs(1), waiter)
+            .await
+            .unwrap(),
+    ] {
+        assert!(
+            result
+                .err()
+                .unwrap()
+                .to_string()
+                .contains("network changed")
+        );
+    }
+    assert!(core.hy2["hy2"].try_lock().unwrap().is_none());
+    let retry = core.hy2(proxy);
+    tokio::pin!(retry);
+    assert!(
+        tokio::time::timeout(Duration::from_millis(20), &mut retry)
+            .await
+            .is_err()
+    );
+    core.stop.cancel();
+    assert!(
+        tokio::time::timeout(Duration::from_secs(1), retry)
+            .await
+            .unwrap()
+            .err()
+            .unwrap()
+            .to_string()
+            .contains("core stopped")
+    );
+}
+
 async fn api_call(
     core: Arc<Core>,
     method: &str,
