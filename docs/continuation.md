@@ -8,6 +8,10 @@ interrupted session or substitute cross-compilation for runtime acceptance.
 
 ## Tasks
 
+Windows self-service acceptance: [windows-manual-acceptance.md](windows-manual-acceptance.md).
+Start from `examples/windows-tun-test.yaml`; its DIRECT configuration passed the
+retained Windows release CLI's `-t` check. This is preparation, not runtime acceptance.
+
 | ID | Task | Status |
 | --- | --- | --- |
 | T1 | Complete workspace tests after oversized UDP fix | Complete at baseline `9e4ac576`: Windows/Linux each 54 passed, 6 ignored |
