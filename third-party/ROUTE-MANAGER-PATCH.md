@@ -4,7 +4,7 @@ Source: crates.io `route_manager` 0.2.9, upstream commit
 `ad0b4389dc4113587743b6a1c45912c6d8caf4ee`.
 Published crate SHA256:
 `bb012980f7bfadc330cc5b99e2a93bda641717554338b6ddb0e86de4188af65b`.
-The original MIT license and source attribution are retained in `route_manager/`.
+The original Apache-2.0 license and source attribution are retained in `route_manager/`.
 This is a generic OS routing foundation, not a proxy protocol implementation.
 
 The upstream synchronous and asynchronous Linux list loops interpret the dump

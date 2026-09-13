@@ -15,9 +15,9 @@ interrupted session or substitute cross-compilation for runtime acceptance.
 | T3 | Refresh and verify packaged binaries from verified source | Complete for baseline `9e4ac576`; new deployment fixes require a subsequent snapshot |
 | T4 | Windows route plus interface metric selection | Complete; Windows unit/live interface query tests passed |
 | T5 | Cancel in-progress HY2 establishment on network changes | Complete; Windows/Linux cancellation regression passed |
-| T6 | Desktop full routing/DNS/network-switch/recovery acceptance | Needs privileged Windows/Wintun and macOS; Linux integration can run locally |
+| T6 | Desktop full routing/DNS/network-switch/recovery acceptance | Linux namespace scenario passed; physical auto-discovery/VPN coexistence and Windows/macOS remain unverified |
 | T7 | iOS arm64 build and macOS build matrix | Needs Mac/Xcode/iPhoneOS SDK |
-| T8 | Refresh final source/binary archives including deployment fixes | In progress; supersedes interim snapshot `66167e0b` |
+| T8 | Refresh final source/binary archives including deployment fixes | Complete for implementation `89fd90f9`, with documented license-description correction |
 
 ## Evidence
 
@@ -84,7 +84,7 @@ interrupted session or substitute cross-compilation for runtime acceptance.
 - The isolated Linux CLI scenario uncovered truncated route enumeration in
   route_manager 0.2.9: dump completion was tested backwards, and reads used a
   fixed 4096-byte buffer. A maintained generic foundation patch fixes synchronous
-  and asynchronous listing; original MIT source/license and patch note retained.
+  and asynchronous listing; original Apache-2.0 source/license and patch note retained.
 - Real DNS lookups uncovered relative-name versus absolute-wire-name equality
   rejecting valid upstream responses. Both normal lookup and bootstrap now build
   absolute questions; a local UDP regression exercises names without final dots.
@@ -100,3 +100,57 @@ interrupted session or substitute cross-compilation for runtime acceptance.
 - Windows administrator token and Wintun DLL checked again: both unavailable.
   No Mac/Xcode host is available. T6/T7 remain only partially accepted; virtual
   Linux checks do not substitute for those operating systems or VPN coexistence.
+
+### Final source and Windows delivery - 2026-09-13
+
+- Implementation `89fd90f99bdb8e4522da81c82b8006c962f32d60`; source was clean.
+  `dist/meta-rust-offline-837c8410.tar.gz`, SHA256
+  `655f04fba911d9556dfd9a7e4d3c0e304ed6c7640cc20a47127424a3a3110f89`.
+  Inventory: 366 packages; 18,766 file hashes; includes all three local foundation
+  patches and their original licenses, plus the desktop acceptance script.
+- Empty-cache/target locked offline release builds passed on Windows and Linux.
+  Logs: `target/continuation-delivery-windows.log`,
+  `target/continuation-delivery-linux.log`; Linux also passed 56 local tests.
+- Windows package: `dist/meta-rust-0.1.0-x86_64-pc-windows-msvc-9f6e0415.tar.gz`.
+  SHA256: `8c76a1def00082d52b5cfa8f5e461042cb61e3a5da03950b2d6cfc64f2c6c616`.
+  Archive re-extracted: exact inventory and 557 payload hashes passed, CLI version
+  and VLESS/HY2 configuration checks passed. CLI SHA256:
+  `bf71b2391daa376f9ae731d45be9d8419ef2a2214455c694a08e12f4a864bd9d`.
+- Windows full workspace Clippy with `-D warnings` passed. The route foundation's
+  optional async Linux implementation also compiled in a separate offline harness.
+- Latest Linux native TUN test passed IPv4/IPv6 TCP/UDP with isolated routes;
+  log `target/continuation-final-native-tun.log`.
+- Android arm64 release build passed again (NDK 27.0.12077973/API24), log
+  `target/continuation-final-android.log`. Dynamic library SHA256:
+  `ba3d53161c371c948c62919e2bf63448814216df3526e8034bd80f5f2e0b99bf`;
+  static library SHA256:
+  `5371635091409eb27562b7ef08bf821ffd6e209ed642965f1a861ee2e4de7c25`.
+- WSL discarded the first verifier's temporary build directory after exit.
+  Linux verification is repeated with packaging in the same session; preserve
+  archive-side records and packages in `dist/`, not transient `/tmp` paths.
+
+### T8 Complete - final archive correction and Linux package
+
+- The route_manager description incorrectly said MIT; the bundled upstream
+  LICENSE was already Apache-2.0. Corrected the description in Git and all three
+  archives, then regenerated manifests and archive checksums. The source inventory
+  explicitly records this post-build documentation change. Comparing old/new
+  manifests confirmed all build inputs unchanged; only the patch note, historical
+  ledger, provenance metadata and checksum list changed. Hashes above are final;
+  earlier build/package logs retain pre-correction archive hashes.
+- Linux package: `dist/meta-rust-0.1.0-x86_64-unknown-linux-gnu-22f943bd.tar.gz`.
+  Final SHA256:
+  `a1a468bed251eed126e78cfae8e6495bc3f62d4a56d47d451872883a1abaef63`.
+  All 522 payload hashes, both example configurations and the real namespace
+  desktop scenario passed using the extracted release executable. Logs:
+  `target/continuation-package-linux.log`,
+  `target/continuation-package-linux-verified.log`.
+- The packaged Linux CLI SHA256 is
+  `45f66d07d720d32dbd75615039ce8aaa6a50c1032ee3e954f7b859d3844f0089`;
+  it comes from the second clean offline build, retained by packaging before WSL
+  removed its temporary directory. Release CLI binaries are unchanged by correction.
+- Final archive inventory/hash verification:
+  `target/continuation-corrected-archives-verified.log`.
+- No push/publication; Alpha unchanged. Remaining acceptance is T6/T7 only:
+  physical-network/VPN coexistence, Windows elevated Wintun runtime, macOS desktop
+  runtime/builds and iOS build on Xcode. Android build is not mobile runtime testing.

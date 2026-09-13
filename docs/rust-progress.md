@@ -9,8 +9,10 @@ recorded there before moving to the next item.
 
 Baseline checkpoint: [handoff.md](handoff.md), 2026-09-13. It records exact commits,
 artifacts and interrupted final verification steps. The continuation ledger now
-records a verified Windows package including the oversized-UDP fix, plus tested
-Windows route-metric and HY2 network-cancellation fixes awaiting a new snapshot.
+records Windows/Linux offline delivery including the route-metric, HY2 network
+cancellation, complete Linux route enumeration and outbound DNS fixes. Linux
+namespace desktop acceptance passed; Windows/macOS runtime and Apple builds
+still require the missing host prerequisites.
 
 ## Scope and Boundaries
 
