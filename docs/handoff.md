@@ -1,5 +1,8 @@
 # Rewrite Handoff - 2026-09-13
 
+For current task statuses and results recorded as each item completes, start with
+[continuation.md](continuation.md). This handoff retains the original baseline.
+
 ## Checkout and Boundaries
 
 - Workspace: `E:/app_workspace/Clash.Meta`; branch `meta-rust`.
