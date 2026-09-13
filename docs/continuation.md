@@ -15,7 +15,7 @@ interrupted session or substitute cross-compilation for runtime acceptance.
 | T3 | Refresh and verify packaged binaries from verified source | Complete for baseline `9e4ac576`; new deployment fixes require a subsequent snapshot |
 | T4 | Windows route plus interface metric selection | Complete; Windows unit/live interface query tests passed |
 | T5 | Cancel in-progress HY2 establishment on network changes | Complete; Windows/Linux cancellation regression passed |
-| T6 | Desktop full routing/DNS/network-switch/recovery acceptance | Linux namespace scenario passed; physical auto-discovery/VPN coexistence and Windows/macOS remain unverified |
+| T6 | Desktop full routing/DNS/network-switch/recovery acceptance | Linux dual-stack/competing-TUN route coexistence passed; physical auto-discovery/system resolver/third-party VPN apps and Windows/macOS remain unverified |
 | T7 | iOS arm64 build and macOS build matrix | Needs Mac/Xcode/iPhoneOS SDK |
 | T8 | Refresh final source/binary archives including deployment fixes | Complete for implementation `89fd90f9`, with documented license-description correction |
 
@@ -154,3 +154,22 @@ interrupted session or substitute cross-compilation for runtime acceptance.
 - No push/publication; Alpha unchanged. Remaining acceptance is T6/T7 only:
   physical-network/VPN coexistence, Windows elevated Wintun runtime, macOS desktop
   runtime/builds and iOS build on Xcode. Android build is not mobile runtime testing.
+
+### Extended Linux dual-stack and VPN route coexistence - 2026-09-13
+
+- Extended the namespace scenario to use IPv6-only DNS names, real IPv6 TCP,
+  4000-byte fragmented UDP and both IPv6 uplinks before/after replacement.
+- A separately open TUN owns four overlapping IPv4/IPv6 routes, including routes
+  with metric 7. All remain identical while meta-rust runs, changes egress,
+  exits normally and recovers from SIGKILL. The prior 121 unrelated routes also
+  remain intact. This is competing-TUN routing acceptance, not a third-party VPN
+  application's full lifecycle or system resolver integration.
+- Command: root `unshare --net --fork python3 scripts/test-desktop-linux.py` using
+  the retained `22f943bd` Linux release executable. Exit 0; all six scenario
+  checkpoints passed. Log: `target/continuation-dual-stack-vpn.log`.
+- Only the acceptance script and documentation changed; product code and verified
+  archives remain unchanged. The archive contains the earlier acceptance script;
+  use the current Git script for these added checks. CI already invokes this script.
+- Windows administrator token and local Wintun DLL checked again: unavailable.
+  Asked for an existing Mac/Xcode environment while completing local tests; no
+  connection details have been supplied at this checkpoint. T6/T7 remain open.

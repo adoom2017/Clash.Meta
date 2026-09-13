@@ -94,8 +94,14 @@ routes survive; the table forces multipart netlink enumeration. Run with:
 sudo unshare --net --fork python3 scripts/test-desktop-linux.py /absolute/path/to/meta-rust
 ```
 
-This does not verify automatic physical-device discovery, IPv6 physical egress,
-system resolver/VPN coexistence, Windows or macOS runtime behavior.
+The extended scenario additionally verifies IPv6 fake-IP, TCP and fragmented
+UDP through both selected uplinks, including replacement. An independently open
+second TUN owns overlapping IPv4/IPv6 routes and routes with the same metric as
+meta-rust; all four remain unchanged during operation, replacement and recovery.
+The IPv6 fake-IP test uses an IPv6-only DNS name to require actual IPv6 egress.
+
+This does not verify automatic physical-device discovery, system resolver
+integration, third-party VPN applications, or Windows/macOS runtime behavior.
 
 2026-09-12/13, Windows x64 and Ubuntu 22.04 WSL:
 
