@@ -17,6 +17,7 @@ interrupted session or substitute cross-compilation for runtime acceptance.
 | T5 | Cancel in-progress HY2 establishment on network changes | Complete; Windows/Linux cancellation regression passed |
 | T6 | Desktop full routing/DNS/network-switch/recovery acceptance | Needs privileged Windows/Wintun and macOS; Linux integration can run locally |
 | T7 | iOS arm64 build and macOS build matrix | Needs Mac/Xcode/iPhoneOS SDK |
+| T8 | Refresh final source/binary archives including deployment fixes | In progress; supersedes interim snapshot `66167e0b` |
 
 ## Evidence
 
@@ -77,3 +78,25 @@ interrupted session or substitute cross-compilation for runtime acceptance.
 - `cargo fmt --all`, `git diff --check` and Windows
   `cargo clippy -p meta-core -p meta-platform --all-targets --locked --offline -- -D warnings`
   passed; Clippy log: `target/continuation-network-clippy.log`.
+
+### Desktop acceptance fixes - 2026-09-13
+
+- The isolated Linux CLI scenario uncovered truncated route enumeration in
+  route_manager 0.2.9: dump completion was tested backwards, and reads used a
+  fixed 4096-byte buffer. A maintained generic foundation patch fixes synchronous
+  and asynchronous listing; original MIT source/license and patch note retained.
+- Real DNS lookups uncovered relative-name versus absolute-wire-name equality
+  rejecting valid upstream responses. Both normal lookup and bootstrap now build
+  absolute questions; a local UDP regression exercises names without final dots.
+- `scripts/test-desktop-linux.py` passed automatic IPv4/IPv6 route creation,
+  IPv4 DNS/fake-IP, TCP/4000-byte UDP, virtual uplink replacement, exclusion
+  refresh, graceful recovery and SIGKILL recovery preserving 121 unrelated routes.
+  Log: `target/continuation-desktop-linux.log`. Namespace-only; no host routes changed.
+- Full workspace tests: Windows 58 passed/6 ignored; Linux 56 passed/6 ignored.
+  Logs: `target/continuation-final-tests-windows.log` and
+  `target/continuation-final-tests-linux.log`.
+- Interim source `66167e0b` passed Windows/Linux empty-cache offline builds, but
+  predates these discovered fixes and is not the final deliverable.
+- Windows administrator token and Wintun DLL checked again: both unavailable.
+  No Mac/Xcode host is available. T6/T7 remain only partially accepted; virtual
+  Linux checks do not substitute for those operating systems or VPN coexistence.

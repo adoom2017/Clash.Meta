@@ -51,3 +51,4 @@ panic = "unwind"
 [patch.crates-io]
 rustls = { path = "third-party/rustls" }
 quinn-proto = { path = "third-party/quinn-proto" }
+route_manager = { path = "third-party/route_manager" }

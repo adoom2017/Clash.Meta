@@ -2254,8 +2254,6 @@ dependencies = [
 [[package]]
 name = "route_manager"
 version = "0.2.9"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bb012980f7bfadc330cc5b99e2a93bda641717554338b6ddb0e86de4188af65b"
 dependencies = [
  "flume",
  "libc",

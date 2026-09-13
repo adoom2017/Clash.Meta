@@ -9,6 +9,7 @@ Local foundation patches:
 
 - `rustls/`: see `RUSTLS-PATCH.md` for the minimal REALITY/Vision handshake hooks.
 - `quinn-proto/`: see `QUINN-PATCH.md` for the separate DATAGRAM frame/queue limits.
+- `route_manager/`: see `ROUTE-MANAGER-PATCH.md` for complete Linux route dumps.
 
 Original upstream licenses are preserved in each directory. `Cargo.lock` pins
 registry versions and checksums. `scripts/prepare-offline.ps1` creates the full

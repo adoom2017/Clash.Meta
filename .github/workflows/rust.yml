@@ -26,6 +26,9 @@ jobs:
       - name: Build local desktop package
         shell: pwsh
         run: ./scripts/package-release.ps1
+      - name: Isolated Linux desktop routing and recovery
+        if: runner.os == 'Linux'
+        run: sudo unshare --net --fork python3 scripts/test-desktop-linux.py "$PWD/target/release/meta-rust"
   ios:
     runs-on: macos-14
     steps:

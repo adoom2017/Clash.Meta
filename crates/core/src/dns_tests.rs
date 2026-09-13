@@ -15,6 +15,49 @@ fn request(name: &str, id: u16) -> Message {
 }
 
 #[tokio::test]
+async fn lookup_and_bootstrap_accept_names_without_final_dot() {
+    let udp = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let address = udp.local_addr().unwrap().to_string();
+    let resolver = Resolver::new(
+        Dns {
+            nameserver: vec![address.clone()],
+            default_nameserver: vec![address],
+            ipv6: false,
+            ..Dns::default()
+        },
+        Arc::new(meta_platform::DefaultHooks),
+    );
+    let server = tokio_util::task::AbortOnDropHandle::new(tokio::spawn(async move {
+        let mut buffer = [0; 4096];
+        for _ in 0..2 {
+            let (n, peer) = udp.recv_from(&mut buffer).await.unwrap();
+            let mut reply = Message::from_vec(&buffer[..n]).unwrap();
+            let name = reply.queries()[0].name().clone();
+            reply.set_message_type(MessageType::Response);
+            reply.add_answer(Record::from_rdata(
+                name,
+                60,
+                RData::A(A("192.0.2.9".parse().unwrap())),
+            ));
+            udp.send_to(&reply.to_vec().unwrap(), peer).await.unwrap();
+        }
+    }));
+    tokio::time::timeout(Duration::from_secs(5), async {
+        assert_eq!(
+            resolver.lookup("echo.test", 443).await.unwrap(),
+            vec!["192.0.2.9:443".parse::<SocketAddr>().unwrap()]
+        );
+        assert_eq!(
+            resolver.bootstrap("dns.test", 853).await.unwrap(),
+            "192.0.2.9:853".parse::<SocketAddr>().unwrap()
+        );
+        server.await.unwrap();
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
 async fn cache_preserves_negative_answers_ttls_and_query_flags() {
     tokio::time::timeout(Duration::from_secs(5), async {
         for negative in [false, true] {

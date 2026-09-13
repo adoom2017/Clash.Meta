@@ -86,7 +86,7 @@ impl Resolver {
         Ok(addresses)
     }
     async fn records(&self, host: &str, kind: RecordType) -> Result<Vec<Record>> {
-        let query = Query::query(Name::from_ascii(host)?, kind);
+        let query = Query::query(absolute_name(host)?, kind);
         let mut request = Message::new();
         request
             .set_id(uuid::Uuid::new_v4().as_u128() as u16)
@@ -216,7 +216,7 @@ impl Resolver {
             let mut msg = Message::new();
             msg.set_id(uuid::Uuid::new_v4().as_u128() as u16)
                 .set_recursion_desired(true)
-                .add_query(Query::query(Name::from_ascii(host)?, kind));
+                .add_query(Query::query(absolute_name(host)?, kind));
             for server in &self.config.default_nameserver {
                 let addr = parse_server(server.trim_start_matches("udp://"), 53)?;
                 let Ok(ip) = addr.host.parse::<IpAddr>() else {
@@ -445,6 +445,14 @@ fn parse_server(server: &str, default: u16) -> Result<Target> {
         Target::new(server, default)
     }
 }
+fn absolute_name(host: &str) -> Result<Name> {
+    let mut name = Name::from_ascii(host)?;
+    // Wire names are always absolute; keep the original question equivalent
+    // to its decoded response even when configuration omits the final dot.
+    name.set_fqdn(true);
+    Ok(name)
+}
+
 fn validate_response(request: &Message, response: &Message) -> Result<()> {
     ensure!(
         response.id() == request.id()

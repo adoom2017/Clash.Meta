@@ -83,6 +83,20 @@ until stop/destroy returns. These are integration interfaces, not mobile apps.
 
 ## Verification Record
 
+2026-09-13: `scripts/test-desktop-linux.py` runs the CLI in a fresh root Linux
+network namespace with two explicitly selected virtual uplinks and a separate
+upstream namespace. It verifies automatic IPv4/IPv6 split routes, IPv4 DNS
+hijack/fake-IP, TCP and fragmented UDP, replacement of the selected interface,
+exclusion refresh, SIGTERM restoration and SIGKILL recovery. All 121 unrelated
+routes survive; the table forces multipart netlink enumeration. Run with:
+
+```sh
+sudo unshare --net --fork python3 scripts/test-desktop-linux.py /absolute/path/to/meta-rust
+```
+
+This does not verify automatic physical-device discovery, IPv6 physical egress,
+system resolver/VPN coexistence, Windows or macOS runtime behavior.
+
 2026-09-12/13, Windows x64 and Ubuntu 22.04 WSL:
 
 - Simulated IP devices: 128 KiB TCP round trips and half-close on IPv4/IPv6;
