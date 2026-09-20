@@ -15,6 +15,89 @@ fn request(name: &str, id: u16) -> Message {
 }
 
 #[tokio::test]
+async fn policy_proxy_resolver_hosts_and_fake_persistence() {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        let udp = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let address = udp.local_addr().unwrap().to_string();
+        let mut config = Dns {
+            ipv6: false,
+            nameserver: vec!["127.0.0.1:1".into()],
+            proxy_server_nameserver: vec![address.clone()],
+            ..Dns::default()
+        };
+        config
+            .nameserver_policy
+            .insert("+.policy.test".into(), meta_config::Strings::One(address));
+        let hooks: meta_platform::Hooks = Arc::new(meta_platform::DefaultHooks);
+        let resolver = Resolver::new(config.clone(), hooks.clone());
+        let mut hosts = std::collections::BTreeMap::new();
+        hosts.insert(
+            "local.test".into(),
+            meta_config::Strings::One("192.0.2.8".into()),
+        );
+        hosts.insert(
+            "alias.test".into(),
+            meta_config::Strings::One("local.test".into()),
+        );
+        resolver
+            .configure(&hosts, &crate::resources::Resources::default())
+            .unwrap();
+        let server = tokio::spawn(async move {
+            let mut b = [0u8; 4096];
+            for _ in 0..2 {
+                let (n, peer) = udp.recv_from(&mut b).await.unwrap();
+                let mut reply = Message::from_vec(&b[..n]).unwrap();
+                let name = reply.queries()[0].name().clone();
+                reply.set_message_type(MessageType::Response);
+                reply.add_answer(Record::from_rdata(
+                    name,
+                    60,
+                    RData::A(A("192.0.2.9".parse().unwrap())),
+                ));
+                udp.send_to(&reply.to_vec().unwrap(), peer).await.unwrap();
+            }
+        });
+        assert_eq!(
+            resolver.lookup("x.policy.test", 443).await.unwrap()[0],
+            "192.0.2.9:443".parse::<SocketAddr>().unwrap()
+        );
+        assert_eq!(
+            resolver.lookup_proxy("node.other.test", 443).await.unwrap()[0],
+            "192.0.2.9:443".parse::<SocketAddr>().unwrap()
+        );
+        assert_eq!(
+            resolver.lookup("alias.test", 80).await.unwrap()[0],
+            "192.0.2.8:80".parse::<SocketAddr>().unwrap()
+        );
+        let host_answer = Message::from_vec(
+            &resolver
+                .answer(&request("local.test", 1).to_vec().unwrap())
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            host_answer.answers()[0].data(),
+            &RData::A(A("192.0.2.8".parse().unwrap()))
+        );
+        let fake = resolver.fake_address("persist.test", false).unwrap();
+        let saved = resolver.export_fake();
+        let next = Resolver::new(config, hooks);
+        next.import_fake(&saved).unwrap();
+        assert_eq!(next.original(fake).as_deref(), Some("persist.test"));
+        assert_eq!(next.fake_address("persist.test", false).unwrap(), fake);
+        assert_ne!(next.fake_address("new.test", false).unwrap(), fake);
+        assert!(
+            next.import_fake(&[("bad.test".into(), "8.8.8.8".parse().unwrap())])
+                .is_err()
+        );
+        server.await.unwrap();
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
 async fn lookup_and_bootstrap_accept_names_without_final_dot() {
     let udp = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
     let address = udp.local_addr().unwrap().to_string();

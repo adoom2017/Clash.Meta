@@ -10,6 +10,8 @@ external proxy core. This is an implementation milestone, not full plan acceptan
 | --- | --- |
 | VLESS without `tls` | VLESS v0 over TCP |
 | `tls: true` | TLS with certificate and server-name verification |
+| `network: ws` | Binary WebSocket frames, early data and V2Ray HTTP Upgrade options |
+| `network: grpc` | HTTP/2 Gun service framing, heartbeat and connection pooling |
 | `skip-cert-verify: true` | Skip certificate trust/name checking; handshake signatures remain verified |
 | `reality-opts` | X25519/HKDF/AES-GCM session authentication and HMAC-authenticated Ed25519 certificate |
 | `flow: xtls-rprx-vision` | Requires outer TLS 1.3; padding and independent read/write direct switches |
@@ -17,10 +19,11 @@ external proxy core. This is an implementation milestone, not full plan acceptan
 | `xudp: true` or `packet-encoding: xudp` | VLESS command 3 with XUDP session framing |
 | Vision UDP | Automatically uses XUDP, since Vision does not support command 2 |
 
-`client-fingerprint` accepts only `rustls` (or omission). Browser fingerprint
-emulation is not implemented; `chrome`, `firefox`, etc. produce a migration error
-with the proxy index instead of being silently ignored. Packet-address encoding,
-other VLESS flows and non-TCP transports are rejected.
+`client-fingerprint` accepts `chrome`, `firefox`, `safari`, `ios`, `android`,
+`edge`, `360`, `qq`, `random` and `randomized`; omission selects Chrome. The
+implementation uses BoringSSL profiles for cipher/group/signature/key-share,
+GREASE, ALPN, ECH GREASE, ALPS and extension ordering. The former `rustls` value
+is rejected with a configuration error.
 
 Each XUDP session currently owns a separate VLESS connection and one target.
 Frames include the target; responses may include an explicit source address.
@@ -50,9 +53,8 @@ command, content length, padding length. Commands are Continue (0), End (1), and
 Direct (2). TLS 1.3 detection handles byte-level fragmentation and ServerHello
 messages split across TLS records. Reads remain active under write backpressure.
 The record adapter drains plaintext and completes encrypted writes before direct
-switches, without reading ahead into subsequent raw records. TLS input is fed to
-rustls until all ciphertext has been consumed, even when `read_tls` reads only part
-of a complete record.
+switches. Its BoringSSL BIO exposes at most one TLS record per poll so Direct mode
+cannot lose raw inner-TLS bytes to TLS read-ahead.
 
 REALITY configs are deliberately single-use: construct one per connection.
 Authentication and certificate verification share a key bound to that exact
@@ -172,4 +174,4 @@ and the XUDP codec in `metacubex/sing-vmess` v0.2.5 from the local Go module cac
 No external proxy implementation was copied, linked or added to Cargo. The Rust
 codec, parsing, cancellation rules, state machines and tests are maintained here.
 Official Xray is used only as an optional test oracle. General TLS modifications
-are documented in `third-party/RUSTLS-PATCH.md`.
+are documented in `third-party/BORINGSSL-PATCH.md`.

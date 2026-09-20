@@ -35,10 +35,8 @@ wsl -d Ubuntu-22.04 -- bash -lc 'export PATH="$HOME/.cargo/bin:$PATH"; export CA
 `xudp_frames` exercises complete frame streams, control frames, bounds and parser
 progress. `vision_frames` exercises TLS ServerHello recognition across different
 fragment sizes and the actual Vision unpadding state machine after TLS decoding.
-TLS cryptography is exercised separately by the local and official-oracle tests.
-`hysteria2_frames` covers UDP decoding/reassembly and Salamander. Its IPv6
-normalization regression and final 653,100-input campaign are recorded in
-`docs/hysteria2-protocol.md`.
+TLS cryptography is exercised separately by the BoringSSL local and optional
+official-Xray oracle tests.
 
 Keep generated corpora and artifacts under `fuzz/`. Promote any minimized crash to
 a deterministic regression test. A bounded campaign is evidence of tested inputs,

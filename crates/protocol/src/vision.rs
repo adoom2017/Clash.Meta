@@ -271,6 +271,12 @@ impl<S: AsyncRead + AsyncWrite + Unpin> AsyncRead for VisionStream<S> {
         let mut frames = 0;
         loop {
             if this.read_plain {
+                if !this.read_header.is_empty() {
+                    let n = this.read_header.len().min(buf.remaining());
+                    buf.put_slice(&this.read_header[..n]);
+                    this.read_header.drain(..n);
+                    return Poll::Ready(Ok(()));
+                }
                 return Pin::new(&mut this.inner).poll_read(cx, buf);
             }
             if this.content > 0 {
@@ -323,8 +329,16 @@ impl<S: AsyncRead + AsyncWrite + Unpin> AsyncRead for VisionStream<S> {
             }
             let offset = if this.read_first {
                 if this.read_header[..16] != this.id {
-                    this.failed = true;
-                    return Poll::Ready(Err(io::Error::other("Vision UUID mismatch")));
+                    // Xray's XtlsUnpadding passes through the first block when
+                    // it does not start with the user UUID. This supports
+                    // peers which negotiate the Vision flow but send an
+                    // unpadded downlink (and older compatible servers).
+                    this.read_first = false;
+                    this.read_plain = true;
+                    let n = this.read_header.len().min(buf.remaining());
+                    buf.put_slice(&this.read_header[..n]);
+                    this.read_header.drain(..n);
+                    return Poll::Ready(Ok(()));
                 }
                 this.read_first = false;
                 16
@@ -408,8 +422,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> AsyncWrite for VisionStream<S> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rustls::pki_types::{PrivateKeyDer, PrivatePkcs8KeyDer, ServerName};
-    use std::{sync::Arc, time::Duration};
+    use std::time::Duration;
     use tokio::io::{AsyncReadExt, AsyncWriteExt, DuplexStream};
 
     fn hello(suite: u16, tls13: bool) -> Vec<u8> {
@@ -445,43 +458,15 @@ mod tests {
         bytes
     }
 
-    async fn pair() -> (
-        VisionStream<DuplexStream>,
-        tokio_rustls::server::TlsStream<DuplexStream>,
-    ) {
-        let certificate = rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
-        let provider = Arc::new(rustls::crypto::ring::default_provider());
-        let server = rustls::ServerConfig::builder_with_provider(provider.clone())
-            .with_protocol_versions(&[&rustls::version::TLS13])
-            .unwrap()
-            .with_no_client_auth()
-            .with_single_cert(
-                vec![certificate.cert.der().clone()],
-                PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(
-                    certificate.signing_key.serialize_der(),
-                )),
-            )
-            .unwrap();
-        let mut roots = rustls::RootCertStore::empty();
-        roots.add(certificate.cert.der().clone()).unwrap();
-        let client = rustls::ClientConfig::builder_with_provider(provider)
-            .with_protocol_versions(&[&rustls::version::TLS13])
-            .unwrap()
-            .with_root_certificates(roots)
-            .with_no_client_auth();
+    async fn pair() -> (VisionStream<DuplexStream>, DuplexStream) {
         let (client_socket, server_socket) = tokio::io::duplex(256 * 1024);
-        let acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(server));
-        let (client, server) = tokio::join!(
-            RecordStream::handshake(
-                client_socket,
-                Arc::new(client),
-                ServerName::try_from("localhost").unwrap()
-            ),
-            acceptor.accept(server_socket)
-        );
         (
-            VisionStream::new(client.unwrap(), uuid::Uuid::nil()).unwrap(),
-            server.unwrap(),
+            VisionStream::new(
+                crate::record::RecordStream::test_tls13_plain(client_socket),
+                uuid::Uuid::nil(),
+            )
+            .unwrap(),
+            server_socket,
         )
     }
 
@@ -513,77 +498,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn read_direct_drains_tls_plaintext_and_keeps_write_encrypted() {
-        tokio::time::timeout(Duration::from_secs(5), async {
-            let (mut client, mut server) = pair().await;
-            let mut bytes = vec![0, 0];
-            bytes.extend(frame(true, 2, b"padded", 11));
-            bytes.extend_from_slice(b"tls-tail");
-            server.write_all(&bytes).await.unwrap();
-            server.flush().await.unwrap();
-            let (mut raw, mut tls) = server.into_inner();
-            raw.write_all(b"raw-tail").await.unwrap();
-            let mut received = [0; 22];
-            for byte in &mut received {
-                *byte = client.read_u8().await.unwrap();
-            }
-            assert_eq!(&received, b"paddedtls-tailraw-tail");
-            assert!(client.inner.inner_mut().tls13());
-            assert!(!client.write_plain);
-            client.write_all(b"still-encrypted").await.unwrap();
-            client.flush().await.unwrap();
-            let mut wire = [0; 4096];
-            let size = raw.read(&mut wire).await.unwrap();
-            assert_eq!(wire[0], 23);
-            tls.read_tls(&mut &wire[..size]).unwrap();
-            tls.process_new_packets().unwrap();
-            use std::io::Read;
-            let mut decoded = [0; 4096];
-            let count = tls.reader().read(&mut decoded).unwrap();
-            assert!(count >= 21 + 15);
-            assert_eq!(&decoded[21..36], b"still-encrypted");
-        })
-        .await
-        .unwrap();
-    }
-
-    #[tokio::test]
-    async fn write_direct_flushes_last_tls_frame_before_raw_data() {
-        tokio::time::timeout(Duration::from_secs(5), async {
-            let (mut client, mut server) = pair().await;
-            let hello = tls_record(&hello(0x1301, true));
-            let mut bytes = vec![0, 0];
-            bytes.extend(frame(true, 0, &hello, 0));
-            server.write_all(&bytes).await.unwrap();
-            server.flush().await.unwrap();
-            for expected in hello {
-                assert_eq!(client.read_u8().await.unwrap(), expected);
-            }
-            assert!(client.sniff.tls13);
-            let application = b"\x17\x03\x03\x00\x03abc";
-            client.write_all(application).await.unwrap();
-            client.flush().await.unwrap();
-            let mut header = [0; 21];
-            server.read_exact(&mut header).await.unwrap();
-            assert_eq!(header[16], 2);
-            let length = u16::from_be_bytes([header[17], header[18]]) as usize;
-            let padding = u16::from_be_bytes([header[19], header[20]]) as usize;
-            let mut content = vec![0; length + padding];
-            server.read_exact(&mut content).await.unwrap();
-            assert_eq!(&content[..length], application);
-            client.write_all(b"raw-next").await.unwrap();
-            client.flush().await.unwrap();
-            let (mut raw, _) = server.into_inner();
-            let mut next = [0; 8];
-            raw.read_exact(&mut next).await.unwrap();
-            assert_eq!(&next, b"raw-next");
-            assert!(!client.read_plain);
-        })
-        .await
-        .unwrap();
-    }
-
-    #[tokio::test]
     async fn unpadding_handles_segments_end_and_truncation() {
         tokio::time::timeout(Duration::from_secs(5), async {
             let (mut client, mut server) = pair().await;
@@ -591,14 +505,12 @@ mod tests {
             bytes.extend(frame(true, 0, b"a", 3));
             bytes.extend(frame(false, 1, b"b", 2));
             bytes.extend_from_slice(b"plain");
-            for byte in bytes {
-                server.write_u8(byte).await.unwrap();
-                server.flush().await.unwrap();
-            }
+            server.write_all(&bytes).await.unwrap();
+            server.flush().await.unwrap();
             let mut result = [0; 7];
             client.read_exact(&mut result).await.unwrap();
             assert_eq!(&result, b"abplain");
-            server.shutdown().await.unwrap();
+            drop(server);
             assert_eq!(client.read(&mut [0]).await.unwrap(), 0);
             for malformed in [
                 vec![0, 0, 1],
@@ -617,9 +529,28 @@ mod tests {
             ] {
                 let (mut client, mut server) = pair().await;
                 server.write_all(&malformed).await.unwrap();
-                server.shutdown().await.unwrap();
+                server.flush().await.unwrap();
+                drop(server);
                 assert!(client.read_to_end(&mut vec![]).await.is_err());
             }
+        })
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn unpadding_passes_through_unframed_downlink() {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            let (mut client, mut server) = pair().await;
+            let payload = b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nOK";
+            let mut bytes = vec![0, 0];
+            bytes.extend_from_slice(payload);
+            server.write_all(&bytes).await.unwrap();
+            server.shutdown().await.unwrap();
+
+            let mut result = Vec::new();
+            client.read_to_end(&mut result).await.unwrap();
+            assert_eq!(result, payload);
         })
         .await
         .unwrap();

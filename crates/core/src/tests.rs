@@ -3,67 +3,61 @@ use tokio::io::AsyncReadExt;
 use tower::ServiceExt;
 
 #[tokio::test]
-async fn network_change_cancels_pending_hy2_and_allows_new_attempt() {
-    let blackhole = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
-    let config = Config::parse(format!(
-        "proxies:\n- name: hy2\n  type: hysteria2\n  server: 127.0.0.1\n  port: {}\n  password: test\n  sni: localhost\nrules: ['MATCH,hy2']\n",
-        blackhole.local_addr().unwrap().port()
-    ).as_bytes()).unwrap();
-    let core = Core::new(config, Arc::new(meta_platform::DefaultHooks)).unwrap();
-    let proxy = &core.config.proxies[0];
-    let first = core.hy2(proxy);
-    tokio::pin!(first);
-    let mut packet = [0; 2048];
-    tokio::select! {
-        result = &mut first => panic!("handshake unexpectedly completed: {}", result.is_ok()),
-        result = tokio::time::timeout(Duration::from_secs(3), blackhole.recv(&mut packet)) => {
-            assert!(result.unwrap().unwrap() > 0);
+async fn listener_conflicts_identify_service_transport_and_address() {
+    for label in [
+        "HTTP proxy",
+        "SOCKS proxy",
+        "mixed HTTP/SOCKS proxy",
+        "DNS",
+        "controller",
+    ] {
+        let blocker = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = blocker.local_addr().unwrap();
+        let mut config = Config::default();
+        match label {
+            "HTTP proxy" => config.port = address.port(),
+            "SOCKS proxy" => config.socks_port = address.port(),
+            "mixed HTTP/SOCKS proxy" => config.mixed_port = address.port(),
+            "DNS" => {
+                config.dns.enable = true;
+                config.dns.listen = address.to_string();
+            }
+            "controller" => config.external_controller = Some(address.to_string()),
+            _ => unreachable!(),
+        }
+        let core = Core::new(config, Arc::new(meta_platform::DefaultHooks)).unwrap();
+        let error = match core.start().await {
+            Err(error) => error,
+            Ok(_) => panic!("occupied TCP listener unexpectedly started"),
+        };
+        assert!(
+            error
+                .to_string()
+                .contains(&format!("cannot bind {label} TCP listener at {address}"))
+        );
+        assert!(error.downcast_ref::<std::io::Error>().is_some());
+        assert!(core.stop.is_cancelled());
+        if label == "DNS" {
+            // A failure of DNS TCP must release the UDP listener already opened.
+            assert!(tokio::net::UdpSocket::bind(address).await.is_ok());
         }
     }
-    let waiter = core.hy2(proxy);
-    tokio::pin!(waiter);
+    let blocker = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let address = blocker.local_addr().unwrap();
+    let mut config = Config::default();
+    config.dns.enable = true;
+    config.dns.listen = address.to_string();
+    let core = Core::new(config, Arc::new(meta_platform::DefaultHooks)).unwrap();
+    let error = match core.start().await {
+        Err(error) => error,
+        Ok(_) => panic!("occupied UDP listener unexpectedly started"),
+    };
     assert!(
-        tokio::time::timeout(Duration::from_millis(20), &mut waiter)
-            .await
-            .is_err()
-    );
-    tokio::time::timeout(Duration::from_secs(1), core.network_changed())
-        .await
-        .unwrap();
-    for result in [
-        tokio::time::timeout(Duration::from_secs(1), first)
-            .await
-            .unwrap(),
-        tokio::time::timeout(Duration::from_secs(1), waiter)
-            .await
-            .unwrap(),
-    ] {
-        assert!(
-            result
-                .err()
-                .unwrap()
-                .to_string()
-                .contains("network changed")
-        );
-    }
-    assert!(core.hy2["hy2"].try_lock().unwrap().is_none());
-    let retry = core.hy2(proxy);
-    tokio::pin!(retry);
-    assert!(
-        tokio::time::timeout(Duration::from_millis(20), &mut retry)
-            .await
-            .is_err()
-    );
-    core.stop.cancel();
-    assert!(
-        tokio::time::timeout(Duration::from_secs(1), retry)
-            .await
-            .unwrap()
-            .err()
-            .unwrap()
+        error
             .to_string()
-            .contains("core stopped")
+            .contains(&format!("cannot bind DNS UDP listener at {address}"))
     );
+    assert!(error.downcast_ref::<std::io::Error>().is_some());
 }
 
 async fn api_call(

@@ -20,12 +20,13 @@ Deliver the Rust core, CLI, reduced Clash API, Windows Wintun and macOS utun;
 retain Linux support. Mobile scope is host interfaces and iOS/Android arm64 build
 verification, not application integration or runtime acceptance.
 
-First release protocols: VLESS TCP/TLS, REALITY, Vision, UDP/XUDP; Hysteria 2
-TCP/UDP, Salamander, port hopping, negotiated bandwidth/rate control. Local
-entrances: HTTP/CONNECT, SOCKS5, mixed, TUN. Include rules, select/url-test groups,
+Runtime protocols: VLESS TCP/WebSocket/gRPC, TLS, REALITY, Vision and XUDP.
+Trojan and Hysteria2 remain parse/group-compatible and return an unavailable
+protocol error when selected. Local entrances: HTTP/CONNECT, SOCKS5, mixed and
+TUN. Include rules, select/url-test groups,
 DNS/fake-IP, legacy encrypted configuration and rotating logs.
 
-No servers, HY1, WS/gRPC/XHTTP, subscriptions, remote rule sets, GEOIP/GEOSITE or GUI.
+No servers, HY1, XHTTP, subscription providers or GUI.
 No external proxy cores in production, directly or indirectly. Generic libraries
 are allowed; protocol implementations and minimal TLS patches are locally owned.
 Pin the toolchain, lock dependencies, archive source snapshots and verify a clean
@@ -36,7 +37,7 @@ offline build for release. Preserve source provenance and third-party licenses.
 - [x] VLESS request encoding, lazy response parsing, TCP/TLS and UDP framing.
 - [x] XUDP encoding, bounded parser, cancellation handling and core integration.
 - [x] Vision padding, fragmented TLS recognition and independent direct switches.
-- [x] REALITY session/certificate authentication and local rustls hooks.
+- [x] REALITY session/certificate authentication and local BoringSSL hooks.
 - [x] Local byte-boundary, malformed input, large duplex transfer and TLS tests.
 - [x] Core integration tests for SOCKS5/HTTP CONNECT, fake-IP and UDP selection.
 - [x] Runnable CLI, configuration example and protocol/patch documentation.
@@ -68,12 +69,9 @@ workspace uses a separate toolchain/lockfile and is not part of this archive.
 
 ## Core, HY2 and Platform Milestones
 
-HY2 protocol milestone verified on Windows x64 against official Hysteria v2.6.4:
-all three oracle suites pass, including TCP/UDP, IPv4/IPv6, fragmentation,
-Salamander, two timed port hops, negotiated bandwidth, negative authentication
-and restart. The generic Quinn DATAGRAM cap patch has an independent test.
-ASan fuzzing exposed an address normalization assertion, now covered by a fixed
-regression; the final parser completed 653,100 inputs. See `hysteria2-protocol.md`.
+The earlier HY2 runtime milestone is retained as history. Its runtime, QUIC
+foundation and fuzz target were removed by the VLESS-only BoringSSL migration;
+see `hysteria2-protocol.md` for the current parse-only behavior.
 
 Core runtime update: TCP and UDP now expose live byte counters, bounded tracked
 connections and cancellation cleanup. HTTP forwarding uses the same relay path.

@@ -26,5 +26,11 @@ test/config/cache*
 /output
 /target/
 /dist/
+/geoip.dat
+/geosite.dat
+/rule_provider/
+/meta-rust-tun.lock
+/.meta-profile.json
+/examples/config-new.yaml
 .vscode/
 .fleet/

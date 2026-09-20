@@ -1,7 +1,8 @@
 # Offline Source Snapshots
 
-The Rust source archive contains the workspace, its lockfile, the locally patched
-rustls/Quinn sources and licenses, and every registry source selected by `Cargo.lock`.
+The Rust source archive contains the workspace, its lockfile, the vendored and
+locally patched BoringSSL binding source and licenses, and every registry source
+selected by `Cargo.lock`.
 It does not include Go product code, external proxy executables or the separate
 fuzz workspace. Xray remains an optional, independently acquired test oracle.
 
@@ -81,7 +82,7 @@ On 2026-09-12:
 - Archive: `dist/meta-rust-offline-668cf4c0.tar.gz` (35,817,409 bytes).
 - SHA-256: `8780970b301474d010d8f3fc41612918b0ea5b9525bcd09b0b71524c3574977f`.
 - Inventory: 279 packages (272 registry packages, six workspace crates and the
-  locally patched rustls); 11,293 per-file hashes.
+  then-current locally patched TLS backend); 11,293 per-file hashes.
 - Source: VLESS milestone `8a18ef6e` plus the archive tools, as recorded by the
   inventory's base revision/dirty status. These later verification notes and the
   repository Linux helper are outside that captured source snapshot.

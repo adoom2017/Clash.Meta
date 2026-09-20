@@ -3,7 +3,7 @@ mod logging;
 use anyhow::{Context, Result, ensure};
 use base64::{Engine, engine::general_purpose::STANDARD};
 use clap::{Parser, ValueEnum};
-use meta_config::{Config, crypto};
+use meta_config::{Config, ProxyKind, crypto};
 use meta_core::Core;
 use meta_platform::{
     DefaultHooks,
@@ -30,6 +30,21 @@ enum Action {
 #[derive(Parser)]
 #[command(name = "meta-rust", version, disable_version_flag = true)]
 struct Args {
+    /// Load and validate GeoIP/GeoSite and rule providers, without opening listeners.
+    #[arg(long,conflicts_with_all=["action","recover_tun"])]
+    test_resources: bool,
+    /// Disable TUN even when the configuration enables it.
+    #[arg(long)]
+    no_tun: bool,
+    /// Run an isolated loopback mixed listener; disables TUN, DNS listener and controller.
+    #[arg(long,value_parser=clap::value_parser!(u16).range(1..))]
+    proxy_test_port: Option<u16>,
+    /// Override VLESS TLS fingerprints during an isolated compatibility test.
+    #[arg(long, requires = "proxy_test_port", hide = true)]
+    proxy_test_client_fingerprint: Option<String>,
+    /// Keep VLESS outbounds; replace unavailable references with REJECT, never DIRECT.
+    #[arg(long)]
+    vless_only: bool,
     /// Restore routes from the interrupted TUN session in the configuration directory.
     #[arg(long, conflicts_with_all = ["action", "test"])]
     recover_tun: bool,
@@ -222,15 +237,62 @@ fn run(mut args: Args) -> Result<()> {
         None => input,
     };
     let mut config = Config::parse(&plaintext)?;
+    config.directory = args.directory.clone();
+    if args.no_tun {
+        config.tun.enable = false;
+    }
+    if let Some(port) = args.proxy_test_port {
+        config.tun.enable = false;
+        config.port = 0;
+        config.socks_port = 0;
+        config.mixed_port = port;
+        config.allow_lan = false;
+        config.dns.enable = false;
+        config.external_controller = None;
+        // Isolated test mode captures stderr and withholds it from the caller.
+        // Keep enough detail there for the test harness to report a sanitized
+        // failure category without writing private node data to a log file.
+        config.log.log_level = "debug".into();
+        config.log.log_path.clear();
+    }
+    if args.vless_only {
+        config.retain_vless()?;
+    }
     if let Some(address) = args.external_controller {
         config.external_controller = Some(address);
     }
     if let Some(secret) = args.secret {
         config.secret = secret;
     }
+    if args.proxy_test_port.is_some() {
+        config.external_controller = None;
+    }
     config.validate()?;
+    // Test-only overrides are applied after validating the user document so
+    // the internal `native` control profile cannot be selected from YAML.
+    if let Some(fingerprint) = &args.proxy_test_client_fingerprint {
+        config.internal_allow_native_profile = fingerprint == "native";
+        config.global_client_fingerprint.clone_from(fingerprint);
+        for proxy in &mut config.proxies {
+            if proxy.kind == ProxyKind::Vless {
+                proxy.client_fingerprint = Some(fingerprint.clone());
+            }
+        }
+    }
     if args.test {
         println!("Configuration test successful");
+        return Ok(());
+    }
+    if args.test_resources {
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()?;
+        runtime.block_on(async {
+            let core = Core::new(config, Arc::new(DefaultHooks))?;
+            core.prepare_resources(false).await?;
+            println!("Routing resource test successful");
+            Ok::<_, anyhow::Error>(())
+        })?;
         return Ok(());
     }
     ensure!(
@@ -246,6 +308,8 @@ fn run(mut args: Args) -> Result<()> {
         .enable_all()
         .build()?;
     runtime.block_on(async {
+        eprintln!("TLS backend: BoringSSL; default client fingerprint: {}", config.global_client_fingerprint);
+        if config.tun.enable{eprintln!("Compatibility: TUN uses the native Rust/smoltcp stack; stack labels do not select a Go gVisor implementation.");}
         let mut desktop = if config.tun.enable {
             Some(DesktopTun::open(Options { name: &config.tun.device, mtu: config.tun.mtu, ipv6: config.ipv6, auto_route: config.tun.auto_route, interface: config.tun.interface.as_deref(), exclusions: &config.tun.route_exclude_address, capture_dns: !config.tun.dns_hijack.is_empty(), directory: &args.directory })?)
         } else { None };

@@ -244,15 +244,26 @@ fn sniff(bytes: &[u8]) -> Option<(Flow, bool)> {
     ))
 }
 
-fn hijack_dns(core: &Core, endpoint: IpEndpoint) -> bool {
-    core.config
-        .tun
-        .dns_hijack
-        .iter()
-        .any(|entry| entry == &format!("any:{}", endpoint.port) || entry == &endpoint.to_string())
+fn hijack_dns(core: &Core, endpoint: IpEndpoint, tcp: bool) -> bool {
+    core.config.tun.dns_hijack.iter().any(|entry| {
+        let entry = if let Some(e) = entry.strip_prefix("tcp://") {
+            if !tcp {
+                return false;
+            }
+            e
+        } else if let Some(e) = entry.strip_prefix("udp://") {
+            if tcp {
+                return false;
+            }
+            e
+        } else {
+            entry
+        };
+        entry == format!("any:{}", endpoint.port) || entry == endpoint.to_string()
+    })
 }
 async fn tcp_session(core: Arc<Core>, flow: Flow, mut stream: ChannelStream) -> Result<()> {
-    if hijack_dns(&core, flow.target) {
+    if hijack_dns(&core, flow.target, true) {
         let serve = async {
             for _ in 0..100 {
                 let n = stream.read_u16().await?;
@@ -267,6 +278,12 @@ async fn tcp_session(core: Arc<Core>, flow: Flow, mut stream: ChannelStream) -> 
         return tokio::time::timeout(Duration::from_secs(120), serve).await?;
     }
     let target = Target::new(flow.target.addr.to_string(), flow.target.port)?;
+    if core.should_sniff(&core.restore_target(&target)) {
+        let (route, destination, prefix) = core.sniff_target(&mut stream, &target).await?;
+        let (mut outbound, name) = core.dial_sniffed(&route, &destination).await?;
+        outbound.write_all(&prefix).await?;
+        return core.relay(Box::new(stream), route, outbound, name).await;
+    }
     let (outbound, name) = core.dial(&target, None).await?;
     core.relay(Box::new(stream), target, outbound, name).await
 }
@@ -276,7 +293,7 @@ async fn udp_session(
     mut input: mpsc::Receiver<Vec<u8>>,
     output: mpsc::Sender<Reply>,
 ) -> Result<()> {
-    if hijack_dns(&core, flow.target) {
+    if hijack_dns(&core, flow.target, false) {
         while let Some(packet) =
             tokio::time::timeout(Duration::from_secs(120), input.recv()).await?
         {

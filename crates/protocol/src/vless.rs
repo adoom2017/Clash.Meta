@@ -15,8 +15,25 @@ pub async fn connect<S: AsyncRead + AsyncWrite + Unpin + Send + 'static>(
     target: &Target,
     command: u8,
 ) -> Result<BoxStream> {
+    connect_with_options(
+        socket,
+        proxy,
+        target,
+        command,
+        "chrome",
+        std::sync::Arc::new(crate::tls::Clock::default()),
+    )
+    .await
+}
+pub async fn connect_with_options<S: AsyncRead + AsyncWrite + Unpin + Send + 'static>(
+    socket: S,
+    proxy: &meta_config::Proxy,
+    target: &Target,
+    command: u8,
+    default_profile: &str,
+    clock: std::sync::Arc<crate::tls::Clock>,
+) -> Result<BoxStream> {
     use anyhow::Context as _;
-    use std::sync::Arc;
     ensure!(
         proxy.kind == meta_config::ProxyKind::Vless,
         "expected VLESS proxy"
@@ -31,38 +48,77 @@ pub async fn connect<S: AsyncRead + AsyncWrite + Unpin + Send + 'static>(
     );
     let id = proxy.uuid.context("VLESS uuid missing")?;
     let header = request(id, target, command, &proxy.flow)?;
-    let mut stream = if proxy.tls || proxy.reality_opts.is_some() {
-        let config = if let Some(options) = &proxy.reality_opts {
-            crate::reality::config(options, &proxy.alpn)?
-        } else {
-            crate::tls::config(&proxy.alpn, proxy.skip_cert_verify)?
-        };
-        let name = proxy
-            .servername
+    let socket: BoxStream = Box::new(socket);
+    let secure = proxy.tls || proxy.reality_opts.is_some();
+    let name = proxy
+        .servername
+        .as_deref()
+        .or(proxy.sni.as_deref())
+        .unwrap_or(&proxy.server)
+        .to_owned();
+    let fingerprint = crate::tls::TlsFingerprint::parse(
+        proxy
+            .client_fingerprint
             .as_deref()
-            .or(proxy.sni.as_deref())
-            .unwrap_or(&proxy.server)
-            .to_owned();
-        crate::record::RecordStream::handshake(
-            socket,
-            Arc::new(config),
-            rustls::pki_types::ServerName::try_from(name)?,
-        )
-        .await?
-    } else {
-        crate::record::RecordStream::plain(socket)
+            .unwrap_or(default_profile),
+    )?;
+    let alpn = match proxy.network.as_str() {
+        "ws" => vec!["http/1.1".into()],
+        "grpc" => vec!["h2".into()],
+        _ => proxy.alpn.clone(),
     };
-    ensure!(
-        proxy.flow.is_empty() || stream.tls13(),
-        "Vision requires outer TLS 1.3"
+    let tls = crate::tls::TlsConnectConfig {
+        server_name: name,
+        alpn,
+        verify_cert: !proxy.skip_cert_verify,
+        fingerprint,
+        reality: proxy.reality_opts.clone(),
+    };
+    tracing::debug!(
+        transport = proxy.network,
+        flow = proxy.flow,
+        tls = proxy.tls,
+        reality = proxy.reality_opts.is_some(),
+        skip_cert_verify = proxy.skip_cert_verify,
+        "connecting VLESS transport"
     );
-    stream.write_all(&header).await?;
-    stream.flush().await?;
     if proxy.flow == "xtls-rprx-vision" {
-        Ok(Box::new(crate::vision::VisionStream::new(stream, id)?))
-    } else {
-        Ok(Box::new(ResponseStream::new(stream)))
+        ensure!(
+            proxy.network == "tcp" && secure,
+            "Vision requires TCP with TLS 1.3"
+        );
+        let mut stream = crate::tls::SecureConnector::new(clock)
+            .connect_xtls(socket, &tls)
+            .await?;
+        ensure!(stream.tls13(), "Vision requires outer TLS 1.3");
+        stream.write_all(&header).await?;
+        stream.flush().await?;
+        return Ok(Box::new(crate::vision::VisionStream::new(stream, id)?));
     }
+    let connector = crate::tls::SecureConnector::new(clock);
+    let mut stream = if secure {
+        connector.connect(socket, &tls).await?
+    } else {
+        socket
+    };
+    let authority = Target::new(&proxy.server, proxy.port)?.to_string();
+    let mut consumed = 0;
+    match proxy.network.as_str() {
+        "tcp" => {}
+        "ws" => {
+            let connected =
+                crate::websocket::connect(stream, &authority, &proxy.ws_opts, &header).await?;
+            stream = connected.0;
+            consumed = connected.1;
+        }
+        "grpc" => {
+            stream = crate::grpc::connect(stream, &authority, &proxy.grpc_opts, secure).await?;
+        }
+        _ => anyhow::bail!("unsupported VLESS network: {}", proxy.network),
+    }
+    stream.write_all(&header[consumed..]).await?;
+    stream.flush().await?;
+    Ok(Box::new(ResponseStream::new(stream)))
 }
 
 pub fn request(id: uuid::Uuid, target: &Target, command: u8, flow: &str) -> Result<Vec<u8>> {

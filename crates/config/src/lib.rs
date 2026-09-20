@@ -1,4 +1,6 @@
+pub mod compat;
 pub mod crypto;
+pub use compat::*;
 pub mod rule;
 
 use anyhow::{Context, Result, bail, ensure};
@@ -39,6 +41,25 @@ pub struct Config {
     pub external_controller: Option<String>,
     #[serde(skip_serializing)]
     pub secret: String,
+    pub rule_providers: std::collections::BTreeMap<String, RuleProvider>,
+    pub geodata_mode: bool,
+    pub geox_url: GeoUrls,
+    pub geo_auto_update: bool,
+    pub geo_update_interval: u64,
+    pub unified_delay: bool,
+    pub tcp_concurrent: bool,
+    pub external_ui: String,
+    pub find_process_mode: String,
+    pub keep_alive_interval: u64,
+    pub global_client_fingerprint: String,
+    pub hosts: std::collections::BTreeMap<String, Strings>,
+    pub profile: Profile,
+    pub ntp: Ntp,
+    pub sniffer: Sniffer,
+    #[serde(skip)]
+    pub directory: std::path::PathBuf,
+    #[serde(skip)]
+    pub internal_allow_native_profile: bool,
 }
 impl Default for Config {
     fn default() -> Self {
@@ -47,7 +68,7 @@ impl Default for Config {
             socks_port: 0,
             mixed_port: 0,
             allow_lan: false,
-            bind_address: "127.0.0.1".into(),
+            bind_address: "*".into(),
             authentication: vec![],
             mode: Mode::Rule,
             ipv6: true,
@@ -60,6 +81,23 @@ impl Default for Config {
             tun: Tun::default(),
             external_controller: None,
             secret: String::new(),
+            rule_providers: Default::default(),
+            geodata_mode: false,
+            geox_url: GeoUrls::default(),
+            geo_auto_update: false,
+            geo_update_interval: 24,
+            unified_delay: false,
+            tcp_concurrent: false,
+            external_ui: String::new(),
+            find_process_mode: "strict".into(),
+            keep_alive_interval: 30,
+            global_client_fingerprint: "chrome".into(),
+            hosts: Default::default(),
+            profile: Profile::default(),
+            ntp: Ntp::default(),
+            sniffer: Sniffer::default(),
+            directory: ".".into(),
+            internal_allow_native_profile: false,
         }
     }
 }
@@ -95,7 +133,7 @@ pub struct Proxy {
     pub kind: ProxyKind,
     pub server: String,
     pub port: u16,
-    #[serde(default, skip_serializing)]
+    #[serde(default, skip_serializing, deserialize_with = "relaxed_uuid")]
     pub uuid: Option<uuid::Uuid>,
     #[serde(default, skip_serializing)]
     pub password: String,
@@ -129,12 +167,32 @@ pub struct Proxy {
     pub obfs_password: String,
     #[serde(default)]
     pub ports: Option<String>,
-    #[serde(default = "hop")]
+    #[serde(default = "hop", deserialize_with = "compat::string_or_number")]
     pub hop_interval: String,
     #[serde(default)]
     pub up: Option<String>,
     #[serde(default)]
     pub down: Option<String>,
+    #[serde(default)]
+    pub ip_version: String,
+    #[serde(default)]
+    pub tfo: bool,
+    #[serde(default)]
+    pub ws_opts: WsOptions,
+    #[serde(default)]
+    pub grpc_opts: GrpcOptions,
+    #[serde(default)]
+    pub protocol: String,
+    #[serde(default, skip_serializing)]
+    pub auth_str: String,
+    #[serde(default, skip_serializing)]
+    pub recv_window_conn: Option<serde_yaml::Value>,
+    #[serde(default, skip_serializing)]
+    pub recv_window: Option<serde_yaml::Value>,
+    #[serde(default)]
+    pub disable_mtu_discovery: bool,
+    #[serde(default)]
+    pub fast_open: bool,
 }
 impl std::fmt::Debug for Proxy {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -146,6 +204,29 @@ impl std::fmt::Debug for Proxy {
 }
 fn yes() -> bool {
     true
+}
+/// Xray's VLESS UUID mapping standard treats a custom non-empty string as the
+/// name in UUIDv5 with the nil UUID namespace. A textual UUID remains unchanged.
+fn relaxed_uuid<'de, D: serde::Deserializer<'de>>(de: D) -> Result<Option<uuid::Uuid>, D::Error> {
+    use sha1::{Digest, Sha1};
+    let value = Option::<String>::deserialize(de)?;
+    value
+        .map(|value| {
+            if value.is_empty() {
+                return Err(serde::de::Error::custom("VLESS uuid must not be empty"));
+            }
+            if let Ok(id) = uuid::Uuid::parse_str(&value) {
+                return Ok(id);
+            }
+            let mut digest = Sha1::new();
+            digest.update([0; 16]);
+            digest.update(value.as_bytes());
+            let mut bytes: [u8; 16] = digest.finalize()[..16].try_into().unwrap();
+            bytes[6] = (bytes[6] & 0x0f) | 0x50;
+            bytes[8] = (bytes[8] & 0x3f) | 0x80;
+            Ok(uuid::Uuid::from_bytes(bytes))
+        })
+        .transpose()
 }
 fn tcp() -> String {
     "tcp".into()
@@ -159,6 +240,7 @@ pub enum ProxyKind {
     Vless,
     #[serde(alias = "hy2")]
     Hysteria2,
+    Trojan,
 }
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields, rename_all = "kebab-case")]
@@ -209,6 +291,8 @@ pub struct Dns {
     pub fake_ip_range6: ipnet::Ipv6Net,
     pub fake_ip_filter: Vec<String>,
     pub ipv6: bool,
+    pub proxy_server_nameserver: Vec<String>,
+    pub nameserver_policy: std::collections::BTreeMap<String, Strings>,
 }
 impl Default for Dns {
     fn default() -> Self {
@@ -222,6 +306,8 @@ impl Default for Dns {
             fake_ip_range6: "fdfe:dcba:9876::/64".parse().unwrap(),
             fake_ip_filter: vec!["localhost".into(), "*.local".into()],
             ipv6: true,
+            proxy_server_nameserver: vec![],
+            nameserver_policy: Default::default(),
         }
     }
 }
@@ -229,6 +315,7 @@ impl Default for Dns {
 #[serde(default, deny_unknown_fields, rename_all = "kebab-case")]
 pub struct Tun {
     pub enable: bool,
+    pub stack: String,
     pub device: String,
     pub auto_route: bool,
     pub auto_detect_interface: bool,
@@ -241,6 +328,7 @@ impl Default for Tun {
     fn default() -> Self {
         Self {
             enable: false,
+            stack: "gvisor".into(),
             device: "meta-rust".into(),
             auto_route: true,
             auto_detect_interface: true,
@@ -253,6 +341,30 @@ impl Default for Tun {
 }
 
 impl Config {
+    pub fn retain_vless(&mut self) -> Result<()> {
+        let removed: HashSet<_> = self
+            .proxies
+            .iter()
+            .filter(|p| p.kind != ProxyKind::Vless)
+            .map(|p| p.name.clone())
+            .collect();
+        self.proxies.retain(|p| p.kind == ProxyKind::Vless);
+        for group in &mut self.proxy_groups {
+            group.proxies.retain(|p| !removed.contains(p));
+            if group.proxies.is_empty() {
+                group.proxies.push("REJECT".into());
+            }
+        }
+        for raw in &mut self.rules {
+            let r = rule::Rule::parse(raw)?;
+            if removed.contains(&r.target) {
+                let suffix = if r.no_resolve { ",no-resolve" } else { "" };
+                let end = raw.len() - suffix.len() - r.target.len();
+                *raw = format!("{}REJECT{suffix}", &raw[..end]);
+            }
+        }
+        self.validate()
+    }
     pub fn parse(bytes: &[u8]) -> Result<Self> {
         ensure!(
             bytes.len() <= 16 * 1024 * 1024,
@@ -261,6 +373,19 @@ impl Config {
         let de = serde_yaml::Deserializer::from_slice(bytes);
         let mut cfg: Self = serde_path_to_error::deserialize(de)
             .context("invalid or unsupported configuration field")?;
+        fn listen(value: &str) -> String {
+            if value.starts_with(':') {
+                format!("0.0.0.0{value}")
+            } else if let Some(port) = value.strip_prefix("localhost:") {
+                format!("127.0.0.1:{port}")
+            } else if let Some(port) = value.strip_prefix("*:") {
+                format!("0.0.0.0:{port}")
+            } else {
+                value.into()
+            }
+        }
+        cfg.external_controller = cfg.external_controller.as_deref().map(listen);
+        cfg.dns.listen = listen(&cfg.dns.listen);
         if cfg.log_level != "info" {
             cfg.log.log_level.clone_from(&cfg.log_level);
         } else {
@@ -270,6 +395,27 @@ impl Config {
         Ok(cfg)
     }
     pub fn validate(&self) -> Result<()> {
+        ensure!(
+            self.internal_allow_native_profile && self.global_client_fingerprint == "native"
+                || [
+                    "chrome",
+                    "firefox",
+                    "safari",
+                    "ios",
+                    "android",
+                    "edge",
+                    "360",
+                    "qq",
+                    "random",
+                    "randomized"
+                ]
+                .contains(&self.global_client_fingerprint.as_str()),
+            if self.global_client_fingerprint == "rustls" {
+                "global-client-fingerprint 'rustls' is unavailable; use a BoringSSL browser profile"
+            } else {
+                "unknown global-client-fingerprint"
+            }
+        );
         ensure!(
             ["debug", "info", "warning", "error", "silent"].contains(&self.log_level.as_str()),
             "invalid log-level"
@@ -288,17 +434,30 @@ impl Config {
                 p.name
             );
             ensure!(
-                p.network == "tcp",
-                "proxy {}: only VLESS network tcp is supported",
+                p.kind != ProxyKind::Vless || ["tcp", "ws", "grpc"].contains(&p.network.as_str()),
+                "proxy {}: VLESS network must be tcp, ws, or grpc",
                 p.name
             );
             match p.kind {
                 ProxyKind::Vless => {
                     ensure!(
-                        p.client_fingerprint
-                            .as_deref()
-                            .is_none_or(|v| v == "rustls"),
-                        "proxies[{index}].client-fingerprint: browser fingerprint emulation is not supported; omit this field or use rustls"
+                        p.client_fingerprint.as_deref().is_none_or(|v| (self
+                            .internal_allow_native_profile
+                            && v == "native")
+                            || [
+                                "firefox",
+                                "chrome",
+                                "safari",
+                                "ios",
+                                "android",
+                                "edge",
+                                "360",
+                                "qq",
+                                "random",
+                                "randomized"
+                            ]
+                            .contains(&v)),
+                        "proxies[{index}].client-fingerprint: unknown TLS profile"
                     );
                     ensure!(
                         p.alpn.iter().all(|v| !v.is_empty() && v.len() <= 255),
@@ -309,6 +468,26 @@ impl Config {
                         p.flow.is_empty() || p.flow == "xtls-rprx-vision",
                         "unsupported flow for {}",
                         p.name
+                    );
+                    ensure!(
+                        p.flow.is_empty() || p.network == "tcp",
+                        "Vision only supports network tcp"
+                    );
+                    ensure!(
+                        p.ws_opts.max_early_data <= 65535,
+                        "proxies[{index}].ws-opts.max-early-data is too large"
+                    );
+                    ensure!(
+                        !p.ws_opts.v2ray_http_upgrade_fast_open || p.ws_opts.v2ray_http_upgrade,
+                        "proxies[{index}].ws-opts fast-open requires v2ray-http-upgrade"
+                    );
+                    ensure!(
+                        p.grpc_opts.max_connections <= 1024,
+                        "proxies[{index}].grpc-opts.max-connections is too large"
+                    );
+                    ensure!(
+                        p.grpc_opts.max_streams <= 65535,
+                        "proxies[{index}].grpc-opts.max-streams is too large"
                     );
                     ensure!(
                         p.flow.is_empty() || p.tls || p.reality_opts.is_some(),
@@ -338,6 +517,9 @@ impl Config {
                     }
                 }
                 ProxyKind::Hysteria2 => {
+                    if !p.auth_str.is_empty() && p.password.is_empty() {
+                        continue;
+                    }
                     ensure!(
                         !p.password.is_empty(),
                         "proxy {}: password required",
@@ -357,6 +539,7 @@ impl Config {
                         bandwidth(value)?;
                     }
                 }
+                ProxyKind::Trojan => {}
             }
         }
         for g in &self.proxy_groups {
@@ -402,6 +585,66 @@ impl Config {
                 "rules[{i}]: unknown target {}",
                 rule.target
             );
+            let mut refs = vec![];
+            rule.matcher.references(&mut refs);
+            for (kind, name) in refs {
+                if kind == "rule-set" {
+                    ensure!(
+                        self.rule_providers.contains_key(&name),
+                        "rules[{i}]: unknown rule provider"
+                    );
+                }
+            }
+        }
+        for p in self.rule_providers.values() {
+            ensure!(
+                ["http", "file", "inline"].contains(&p.kind.as_str()),
+                "invalid rule provider type"
+            );
+            ensure!(
+                ["domain", "ipcidr", "classical"].contains(&p.behavior.as_str()),
+                "invalid rule provider behavior"
+            );
+            ensure!(
+                ["yaml", "text"].contains(&p.format.as_str()),
+                "invalid rule provider format"
+            );
+            ensure!(
+                p.kind == "inline" || !p.path.is_empty(),
+                "rule provider path is required"
+            );
+            ensure!(
+                p.kind != "http" || p.url.starts_with("https://") || p.url.starts_with("http://"),
+                "HTTP rule provider URL is required"
+            );
+        }
+        ensure!(
+            self.geo_update_interval > 0 && self.geo_update_interval <= 8760,
+            "invalid geo-update-interval"
+        );
+        ensure!(
+            ["strict", "always", "off"].contains(&self.find_process_mode.as_str()),
+            "invalid find-process-mode"
+        );
+        ensure!(
+            ["gvisor", "system", "mixed"].contains(&self.tun.stack.as_str()),
+            "invalid tun.stack"
+        );
+        ensure!(
+            self.ntp.interval > 0 && self.ntp.port > 0,
+            "invalid NTP interval/port"
+        );
+        for (protocol, sniff) in &self.sniffer.sniff {
+            ensure!(
+                ["HTTP", "TLS"].contains(&protocol.as_str()),
+                "only HTTP/TLS sniffing is supported"
+            );
+            for port in &sniff.ports {
+                port.bounds()?;
+            }
+        }
+        for value in self.dns.nameserver_policy.values() {
+            ensure!(!value.values().is_empty(), "empty DNS policy upstreams");
         }
         ensure!(
             ["fake-ip", "redir-host"].contains(&self.dns.enhanced_mode.as_str()),
@@ -430,6 +673,10 @@ impl Config {
             "tun.route-exclude-address limit is 1024"
         );
         for (index, value) in self.tun.dns_hijack.iter().enumerate() {
+            let value = value
+                .strip_prefix("tcp://")
+                .or_else(|| value.strip_prefix("udp://"))
+                .unwrap_or(value);
             let valid = if let Some(port) = value.strip_prefix("any:") {
                 port.parse::<u16>().is_ok_and(|p| p != 0)
             } else {
@@ -455,9 +702,11 @@ impl Config {
                 "non-loopback controller requires secret"
             );
         }
-        self.bind_address
-            .parse::<IpAddr>()
-            .context("bind-address must be an IP address")?;
+        if self.bind_address != "*" {
+            self.bind_address
+                .parse::<IpAddr>()
+                .context("bind-address must be an IP address or *")?;
+        }
         Ok(())
     }
 }
@@ -539,12 +788,23 @@ mod tests {
         let base = "proxies:\n- name: test\n  type: vless\n  server: localhost\n  port: 443\n  uuid: 11223344-5566-7788-99aa-bbccddeeff00\n";
         let config = Config::parse(format!("{base}  packet-encoding: xudp\n").as_bytes()).unwrap();
         assert_eq!(config.proxies[0].packet_encoding.as_deref(), Some("xudp"));
+        assert!(Config::parse(format!("{base}  client-fingerprint: firefox\n").as_bytes()).is_ok());
         let err =
-            Config::parse(format!("{base}  client-fingerprint: chrome\n").as_bytes()).unwrap_err();
+            Config::parse(format!("{base}  client-fingerprint: invalid-profile\n").as_bytes())
+                .unwrap_err();
         assert!(err.to_string().contains("proxies[0].client-fingerprint"));
         assert!(Config::parse(format!("{base}  flow: xtls-rprx-vision\n").as_bytes()).is_err());
         assert!(
             Config::parse(format!("{base}  packet-encoding: packetaddr\n").as_bytes()).is_err()
         );
+        let mapped = Config::parse(
+            b"proxies:\n- name: test\n  type: vless\n  server: localhost\n  port: 443\n  uuid: example\n",
+        )
+        .unwrap();
+        assert_eq!(
+            mapped.proxies[0].uuid.unwrap().to_string(),
+            "feb54431-301b-52bb-a6dd-e1e93e81bb9e"
+        );
+        assert!(Config::parse(b"proxies:\n- name: test\n  type: vless\n  server: localhost\n  port: 443\n  uuid: ''\n").is_err());
     }
 }

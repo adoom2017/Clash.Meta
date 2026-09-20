@@ -15,12 +15,10 @@ tokio-util.workspace = true
 bytes.workspace = true
 uuid.workspace = true
 rand.workspace = true
-rustls.workspace = true
-tokio-rustls.workspace = true
-webpki-roots.workspace = true
-quinn.workspace = true
-h3.workspace = true
-h3-quinn.workspace = true
+boring.workspace = true
+boring-sys.workspace = true
+tokio-boring.workspace = true
+webpki-root-certs.workspace = true
 http.workspace = true
 blake2.workspace = true
 tracing.workspace = true
@@ -34,6 +32,14 @@ hkdf = "0.12"
 sha2 = "0.10"
 hmac = "0.12"
 x509-parser = "0.18"
+futures-util = "0.3"
+h2 = "0.4"
+httparse = "1"
+sha1 = "0.10"
+foreign-types-shared = "0.3"
+brotli.workspace = true
+flate2.workspace = true
+zstd.workspace = true
 
 [dev-dependencies]
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

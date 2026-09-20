@@ -11,7 +11,8 @@ For current task statuses and results recorded as each item completes, start wit
   matches HEAD; this agent did not push or publish anything.
 - `Alpha` remains `3fce2b4fe0eaefd2016f1b60312e1bb991b5c1e3`.
 - Production uses repository-owned proxy protocols and generic foundations only.
-  Xray/Hysteria executables are test oracles under ignored `target/oracles`.
+  Xray may be used as an ignored VLESS test oracle. The historical Hysteria
+  oracle is no longer used after the VLESS-only migration.
 - Continue in this workspace; do not remove unrelated binaries or user changes.
   Do not use subagents unless explicitly requested. No test/build session from
   the previous run remains available; final interrupted checks need rerunning.
@@ -73,9 +74,9 @@ Previous fully verified source SHA-256:
 `2ecdaab5029f79f4813c1ae81638e684130ac20a413c6eb5c770c1cc967564d7`.
 Current binary package SHA-256:
 `f37f2177a4aae78f0d254616c91be4671a5d4c9d796ded5d159888f1d78be970`.
-Latest inventory: 366 packages (358 registry, six workspace, two local patches),
-18,767 source-file hashes. License notices and minimal rustls/Quinn patches are
-preserved. Binary packaging accounts for upstream crates missing license texts.
+That historical inventory contained 366 packages (358 registry, six workspace,
+two local patches) and 18,767 source-file hashes. The later BoringSSL-only
+migration supersedes its TLS/QUIC dependency snapshot.
 
 Android artifacts: `target/aarch64-linux-android/release/libmeta_ffi.a` and `.so`.
 Final `.so` SHA-256:
@@ -112,7 +113,7 @@ cargo test --workspace --locked --offline
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets --locked --offline -- -D warnings
 pwsh -File scripts/test-vless.ps1
-pwsh -File scripts/test-hysteria2.ps1
+pwsh -File scripts/test-local-proxy.ps1 -ConfigPath C:/private/config.yaml -StartProxy -TestResources
 pwsh -File target/offline-final-extracted/meta-rust-offline-607ae268/scripts/verify-offline.ps1
 pwsh -File scripts/check-mobile.ps1 -Platform android -Ndk C:/Users/sdc/AppData/Local/Android/Sdk/ndk/27.0.12077973 -Release
 ```

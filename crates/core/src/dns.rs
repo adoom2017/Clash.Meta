@@ -12,7 +12,7 @@ use meta_protocol::Target;
 use std::{
     collections::HashMap,
     net::{IpAddr, SocketAddr},
-    sync::Mutex,
+    sync::{Mutex, RwLock},
     time::{Duration, Instant},
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -40,14 +40,35 @@ struct FakeMap {
 pub struct Resolver {
     pub config: Dns,
     hooks: Hooks,
+    clock: std::sync::Arc<meta_protocol::tls::Clock>,
     cache: Mutex<Cache>,
     fake: Mutex<FakeMap>,
+    policy: RwLock<DnsPolicy>,
+}
+#[derive(Clone, Default)]
+struct DnsPolicy {
+    hosts: std::collections::BTreeMap<String, meta_config::Strings>,
+    nameservers: Vec<(meta_config::rule::Matcher, Vec<String>)>,
+    filters: Vec<meta_config::rule::Matcher>,
 }
 impl Resolver {
     pub fn new(config: Dns, hooks: Hooks) -> Self {
+        Self::new_with_clock(
+            config,
+            hooks,
+            std::sync::Arc::new(meta_protocol::tls::Clock::default()),
+        )
+    }
+    pub fn new_with_clock(
+        config: Dns,
+        hooks: Hooks,
+        clock: std::sync::Arc<meta_protocol::tls::Clock>,
+    ) -> Self {
         Self {
             config,
             hooks,
+            clock,
+            policy: RwLock::new(DnsPolicy::default()),
             cache: Mutex::new(Cache::default()),
             fake: Mutex::new(FakeMap {
                 by_name: HashMap::new(),
@@ -57,13 +78,175 @@ impl Resolver {
             }),
         }
     }
+    pub fn clock(&self) -> std::sync::Arc<meta_protocol::tls::Clock> {
+        self.clock.clone()
+    }
+    pub fn configure(
+        &self,
+        hosts: &std::collections::BTreeMap<String, meta_config::Strings>,
+        resources: &crate::resources::Resources,
+    ) -> Result<()> {
+        fn matcher(
+            pattern: &str,
+            resources: &crate::resources::Resources,
+        ) -> Result<meta_config::rule::Matcher> {
+            for (prefix, kind) in [("geosite:", "GEOSITE"), ("rule-set:", "RULE-SET")] {
+                if let Some(tags) = pattern.strip_prefix(prefix) {
+                    let nodes = tags
+                        .split(',')
+                        .map(|tag| {
+                            resources.bind(&meta_config::rule::Matcher::parse_condition(&format!(
+                                "{kind},{tag}"
+                            ))?)
+                        })
+                        .collect::<Result<Vec<_>>>()?;
+                    return Ok(meta_config::rule::Matcher::Or(nodes.into()));
+                }
+            }
+            meta_config::rule::domain_pattern(pattern)
+        }
+        let mut entries: Vec<_> = self.config.nameserver_policy.iter().collect();
+        entries.sort_by_key(|(key, _)| {
+            std::cmp::Reverse(
+                if key.starts_with("geosite:") || key.starts_with("rule-set:") {
+                    0
+                } else {
+                    key.len()
+                        + if key.contains('*') || key.starts_with('+') || key.starts_with('.') {
+                            0
+                        } else {
+                            65536
+                        }
+                },
+            )
+        });
+        let nameservers = entries
+            .into_iter()
+            .map(|(key, value)| Ok((matcher(key, resources)?, value.values())))
+            .collect::<Result<Vec<_>>>()?;
+        let filters = self
+            .config
+            .fake_ip_filter
+            .iter()
+            .map(|p| matcher(p, resources))
+            .collect::<Result<Vec<_>>>()?;
+        *self.policy.write().unwrap() = DnsPolicy {
+            hosts: hosts.clone(),
+            nameservers,
+            filters,
+        };
+        self.clear_cache();
+        Ok(())
+    }
+    pub fn set_hosts(&self, hosts: &std::collections::BTreeMap<String, meta_config::Strings>) {
+        self.policy.write().unwrap().hosts = hosts.clone();
+    }
+    fn host_values(&self, host: &str) -> Option<Vec<String>> {
+        let host = host.trim_end_matches('.').to_ascii_lowercase();
+        let policy = self.policy.read().unwrap();
+        if let Some(v) = policy.hosts.get(&host) {
+            return Some(v.values());
+        }
+        policy
+            .hosts
+            .iter()
+            .filter(|(key, _)| key.contains('*') || key.starts_with('+'))
+            .filter(|(key, _)| {
+                meta_config::rule::domain_pattern(key)
+                    .is_ok_and(|m| m.evaluate(&host, None, 0, "", false) == Some(true))
+            })
+            .max_by_key(|(key, _)| key.len())
+            .map(|(_, v)| v.values())
+    }
+    pub async fn lookup_proxy(&self, host: &str, port: u16) -> Result<Vec<SocketAddr>> {
+        if self.config.proxy_server_nameserver.is_empty() {
+            return self.lookup(host, port).await;
+        }
+        let mut config = self.config.clone();
+        config.nameserver = config.proxy_server_nameserver.clone();
+        config.nameserver_policy.clear();
+        let resolver = Self::new_with_clock(config, self.hooks.clone(), self.clock.clone());
+        resolver.set_hosts(&self.policy.read().unwrap().hosts);
+        resolver.lookup(host, port).await
+    }
     pub fn original(&self, ip: IpAddr) -> Option<String> {
         self.fake.lock().unwrap().by_ip.get(&ip).cloned()
+    }
+    pub fn export_fake(&self) -> Vec<(String, IpAddr)> {
+        self.fake
+            .lock()
+            .unwrap()
+            .by_ip
+            .iter()
+            .map(|(ip, name)| (name.clone(), *ip))
+            .collect()
+    }
+    pub fn import_fake(&self, entries: &[(String, IpAddr)]) -> Result<()> {
+        ensure!(entries.len() <= 32768, "saved fake-IP capacity exceeded");
+        let mut map = FakeMap {
+            by_name: HashMap::new(),
+            by_ip: HashMap::new(),
+            next4: 2,
+            next6: 2,
+        };
+        for (name, ip) in entries {
+            absolute_name(name)?;
+            let name = name.trim_end_matches('.').to_ascii_lowercase();
+            match ip {
+                IpAddr::V4(ip) => {
+                    let net = self.config.fake_ip_range;
+                    ensure!(
+                        net.contains(ip) && *ip != net.broadcast(),
+                        "saved fake-IP outside pool"
+                    );
+                    let n = u64::from(u32::from(*ip)) - u64::from(u32::from(net.network()));
+                    ensure!(n >= 2, "reserved fake-IP");
+                    map.next4 = map.next4.max(n + 1);
+                }
+                IpAddr::V6(ip) => {
+                    let net = self.config.fake_ip_range6;
+                    ensure!(net.contains(ip), "saved fake-IP outside pool");
+                    let n = u128::from(*ip) - u128::from(net.network());
+                    ensure!(n >= 2, "reserved fake-IP");
+                    map.next6 = map
+                        .next6
+                        .max(n.checked_add(1).context("saved pool overflow")?);
+                }
+            }
+            ensure!(
+                map.by_ip.insert(*ip, name.clone()).is_none()
+                    && map.by_name.insert((name, ip.is_ipv6()), *ip).is_none(),
+                "duplicate saved fake-IP"
+            );
+        }
+        *self.fake.lock().unwrap() = map;
+        Ok(())
     }
     pub fn clear_cache(&self) {
         *self.cache.lock().unwrap() = Cache::default();
     }
     pub async fn lookup(&self, host: &str, port: u16) -> Result<Vec<SocketAddr>> {
+        let mut host = host.trim_end_matches('.').to_ascii_lowercase();
+        for depth in 0..16 {
+            let Some(values) = self.host_values(&host) else {
+                break;
+            };
+            let ips: Vec<_> = values
+                .iter()
+                .filter_map(|v| v.parse::<IpAddr>().ok())
+                .filter(|ip| ip.is_ipv4() || self.config.ipv6)
+                .map(|ip| SocketAddr::new(ip, port))
+                .collect();
+            if values.iter().all(|v| v.parse::<IpAddr>().is_ok()) {
+                return Ok(ips);
+            }
+            ensure!(
+                values.len() == 1 && depth < 15,
+                "invalid or cyclic hosts alias"
+            );
+            host = values[0].trim_end_matches('.').to_ascii_lowercase();
+        }
+        let host = host.as_str();
         if let Ok(ip) = host.parse::<IpAddr>() {
             return Ok(vec![SocketAddr::new(ip, port)]);
         }
@@ -191,7 +374,26 @@ impl Resolver {
     }
     async fn exchange(&self, request: &Message) -> Result<Message> {
         let mut error = anyhow::anyhow!("no DNS upstream");
-        for upstream in &self.config.nameserver {
+        let host = request
+            .queries()
+            .first()
+            .map(|q| {
+                q.name()
+                    .to_ascii()
+                    .trim_end_matches('.')
+                    .to_ascii_lowercase()
+            })
+            .unwrap_or_default();
+        let servers = self
+            .policy
+            .read()
+            .unwrap()
+            .nameservers
+            .iter()
+            .find(|(m, _)| m.evaluate(&host, None, 0, "", false) == Some(true))
+            .map(|(_, v)| v.clone())
+            .unwrap_or_else(|| self.config.nameserver.clone());
+        for upstream in &servers {
             match tokio::time::timeout(
                 Duration::from_secs(5),
                 self.query_upstream(upstream, request),
@@ -244,11 +446,16 @@ impl Resolver {
             let target = Target::from_uri(&uri, 443)?;
             let addr = self.bootstrap(&target.host, target.port).await?;
             let socket = meta_platform::tcp_connect(addr, &*self.hooks).await?;
-            let config = meta_protocol::tls::config(&["http/1.1".into()], false)?;
-            let tls = tokio_rustls::TlsConnector::from(std::sync::Arc::new(config))
+            let tls = meta_protocol::tls::SecureConnector::new(self.clock.clone())
                 .connect(
-                    rustls::pki_types::ServerName::try_from(target.host)?,
-                    socket,
+                    Box::new(socket),
+                    &meta_protocol::tls::TlsConnectConfig {
+                        server_name: target.host,
+                        alpn: vec!["http/1.1".into()],
+                        verify_cert: true,
+                        fingerprint: meta_protocol::tls::TlsFingerprint::Native,
+                        reality: None,
+                    },
                 )
                 .await?;
             let (mut sender, connection) = hyper::client::conn::http1::Builder::new()
@@ -351,12 +558,19 @@ impl Resolver {
             .to_ascii()
             .trim_end_matches('.')
             .to_ascii_lowercase();
-        let excluded = self.config.fake_ip_filter.iter().any(|pattern| {
-            host == *pattern
-                || pattern
-                    .strip_prefix("*.")
-                    .is_some_and(|suffix| host == suffix || host.ends_with(&format!(".{suffix}")))
-        });
+        let excluded = self
+            .policy
+            .read()
+            .unwrap()
+            .filters
+            .iter()
+            .any(|m| m.evaluate(&host, None, 0, "", false) == Some(true))
+            || self.config.fake_ip_filter.iter().any(|pattern| {
+                host == *pattern
+                    || pattern.strip_prefix("*.").is_some_and(|suffix| {
+                        host == suffix || host.ends_with(&format!(".{suffix}"))
+                    })
+            });
         let mut response = Message::new();
         response
             .set_id(request.id())
@@ -368,6 +582,32 @@ impl Resolver {
             && query.query_type() == RecordType::AAAA
             && !self.config.ipv6
         {
+            return Ok(response.to_vec()?);
+        }
+        if self.host_values(&host).is_some()
+            && matches!(query.query_type(), RecordType::A | RecordType::AAAA)
+        {
+            match self.lookup(&host, 0).await {
+                Ok(addresses) => {
+                    for addr in addresses {
+                        let data = match addr.ip() {
+                            IpAddr::V4(ip) if query.query_type() == RecordType::A => {
+                                Some(RData::A(A(ip)))
+                            }
+                            IpAddr::V6(ip) if query.query_type() == RecordType::AAAA => {
+                                Some(RData::AAAA(AAAA(ip)))
+                            }
+                            _ => None,
+                        };
+                        if let Some(data) = data {
+                            response.add_answer(Record::from_rdata(query.name().clone(), 60, data));
+                        }
+                    }
+                }
+                Err(_) => {
+                    response.set_response_code(ResponseCode::ServFail);
+                }
+            }
             return Ok(response.to_vec()?);
         }
         if self.config.enhanced_mode == "fake-ip"

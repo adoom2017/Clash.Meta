@@ -57,37 +57,3 @@ pub fn xudp_frames(data: &[u8]) {
 pub fn vision_frames(data: &[u8]) {
     crate::vision::fuzz_frames(data);
 }
-
-pub fn hysteria2_frames(data: &[u8]) {
-    use crate::hysteria2::{Reassembler, UdpMessage, salamander_decode, salamander_encode};
-    if let Ok(message) = UdpMessage::decode(data) {
-        let encoded = message.encode().unwrap();
-        let decoded = UdpMessage::decode(&encoded).unwrap();
-        assert_eq!(decoded.target, message.target);
-        assert_eq!(decoded.payload, message.payload);
-    }
-    if data.len() >= 8 {
-        let salt = data[..8].try_into().unwrap();
-        let encoded = salamander_encode(b"fuzz-key", salt, &data[8..]);
-        if data.len() > 8 {
-            assert_eq!(
-                salamander_decode(b"fuzz-key", &encoded).unwrap(),
-                &data[8..]
-            );
-        }
-    }
-    let mut reassembler = Reassembler::default();
-    for chunk in data.chunks(256).filter(|c| c.len() >= 8) {
-        let message = UdpMessage {
-            session: u32::from_be_bytes(chunk[..4].try_into().unwrap()),
-            packet: u16::from_be_bytes(chunk[4..6].try_into().unwrap()),
-            fragment: chunk[6],
-            count: chunk[7],
-            target: Target::new("example.org", 53).unwrap(),
-            payload: chunk[8..].to_vec(),
-        };
-        if let Ok(Some((_, payload))) = reassembler.push(message) {
-            assert!(payload.len() <= 65507);
-        }
-    }
-}

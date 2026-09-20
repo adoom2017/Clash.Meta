@@ -8,9 +8,9 @@ fixtures use synthetic configuration only. No Go compiler is needed by Rust test
 
 | Area | Supported |
 | --- | --- |
-| Nodes | VLESS TCP, TLS, REALITY, Vision, UDP/XUDP; Hysteria 2 TCP/UDP, Salamander, hopping, bandwidth |
+| Nodes | VLESS TCP, WebSocket and gRPC; TLS, REALITY, Vision on TCP, UDP/XUDP; Trojan/Hysteria2 parse-only |
 | Entrances | HTTP, CONNECT, SOCKS5, mixed, explicitly enabled TUN |
-| Rules | DOMAIN, DOMAIN-SUFFIX, DOMAIN-KEYWORD, IP-CIDR, IP-CIDR6, DST-PORT, NETWORK, MATCH; first match |
+| Rules | DOMAIN/DOMAIN-SUFFIX/DOMAIN-KEYWORD/DOMAIN-REGEX, IP-CIDR/IP-CIDR6, DST-PORT, NETWORK, GEOIP, GEOSITE, RULE-SET, AND/OR/NOT, MATCH; first match |
 | Groups | select, url-test; duplicate/cycle/reference validation |
 | DNS | UDP/TCP, HTTPS DoH, cache, fake-IP, bootstrap using IP resolvers |
 | CLI | -f, -d, -t, -v, -p, --action encrypt/decrypt, --recover-tun |
@@ -18,8 +18,8 @@ fixtures use synthetic configuration only. No Go compiler is needed by Rust test
 | Hosts | Core lifecycle, PlatformHooks, PacketIo, C ABI v1, Android protect and TUN fd |
 
 Unknown fields and unsupported enum values return a path-aware migration error.
-Not included: servers, HY1, WS/gRPC/XHTTP, subscriptions/providers, remote rule
-sets, GEOIP/GEOSITE, GUI, VMess, Shadowsocks, Trojan, TUIC, process rules and DoT.
+Not included: servers, HY1, XHTTP, subscription providers, GUI, VMess,
+Shadowsocks, Trojan/Hysteria2 runtime, TUIC, process rules and DoT.
 Examples from the old Go product are not silently accepted as full compatibility.
 
 | Controller | Operations |

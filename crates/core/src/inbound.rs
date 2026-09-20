@@ -137,6 +137,13 @@ async fn socks_connection(core: Arc<Core>, mut stream: TcpStream, peer: SocketAd
         Ok::<_, anyhow::Error>((cmd, target))
     };
     let (cmd, target) = tokio::time::timeout(Duration::from_secs(10), handshake).await??;
+    if cmd == 1 && core.should_sniff(&core.restore_target(&target)) {
+        stream.write_all(&[5, 0, 0, 1, 0, 0, 0, 0, 0, 0]).await?;
+        let (route, destination, prefix) = core.sniff_target(&mut stream, &target).await?;
+        let (mut outbound, name) = core.dial_sniffed(&route, &destination).await?;
+        outbound.write_all(&prefix).await?;
+        return core.relay(Box::new(stream), route, outbound, name).await;
+    }
     match cmd {
         1 => match core.dial(&target, None).await {
             Ok((outbound, name)) => {
@@ -266,6 +273,15 @@ async fn http_connection(core: Arc<Core>, stream: &mut TcpStream) -> Result<()> 
         );
         Target::from_uri(&uri, 80)?
     };
+    if method == "CONNECT" && core.should_sniff(&core.restore_target(&target)) {
+        stream
+            .write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n")
+            .await?;
+        let (route, destination, prefix) = core.sniff_target(stream, &target).await?;
+        let (mut outbound, node) = core.dial_sniffed(&route, &destination).await?;
+        outbound.write_all(&prefix).await?;
+        return core.relay_io(stream, route, outbound, node).await;
+    }
     let (mut outbound, node) = match core.dial(&target, None).await {
         Ok(v) => v,
         Err(e) => {

@@ -1,12 +1,13 @@
 #[cfg(feature = "fuzzing")]
 #[doc(hidden)]
 pub mod fuzzing;
-pub mod hysteria2;
+pub mod grpc;
 pub mod reality;
 pub mod record;
 pub mod tls;
 pub mod vision;
 pub mod vless;
+pub mod websocket;
 pub mod wire;
 pub mod xudp;
 
@@ -15,7 +16,6 @@ use async_trait::async_trait;
 use std::{
     fmt,
     net::{IpAddr, SocketAddr},
-    pin::Pin,
 };
 use tokio::io::{AsyncRead, AsyncWrite};
 
@@ -100,42 +100,6 @@ pub trait Datagram: Send + Sync {
     async fn recv(&self) -> Result<(Target, Vec<u8>)>;
 }
 
-/// Combine independently owned QUIC stream halves without an intermediary task.
-pub struct SplitStream {
-    pub send: quinn::SendStream,
-    pub recv: quinn::RecvStream,
-}
-impl AsyncRead for SplitStream {
-    fn poll_read(
-        mut self: Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
-        buf: &mut tokio::io::ReadBuf<'_>,
-    ) -> std::task::Poll<std::io::Result<()>> {
-        Pin::new(&mut self.recv).poll_read(cx, buf)
-    }
-}
-impl AsyncWrite for SplitStream {
-    fn poll_write(
-        mut self: Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
-        bytes: &[u8],
-    ) -> std::task::Poll<std::io::Result<usize>> {
-        AsyncWrite::poll_write(Pin::new(&mut self.send), cx, bytes)
-    }
-    fn poll_flush(
-        mut self: Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
-    ) -> std::task::Poll<std::io::Result<()>> {
-        AsyncWrite::poll_flush(Pin::new(&mut self.send), cx)
-    }
-    fn poll_shutdown(
-        mut self: Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
-    ) -> std::task::Poll<std::io::Result<()>> {
-        AsyncWrite::poll_shutdown(Pin::new(&mut self.send), cx)
-    }
-}
-
 #[cfg(test)]
 mod target_tests {
     use super::*;
@@ -155,12 +119,6 @@ mod target_tests {
         ] {
             assert!(Target::parse(malformed).is_err(), "{malformed}");
         }
-        assert!(
-            crate::hysteria2::UdpMessage::decode(&[
-                1, 15, 4, 0, 4, 4, 5, 32, 6, 97, 58, 58, 48, 58, 53, 52, 58, 32, 1
-            ])
-            .is_err()
-        );
     }
     #[test]
     fn url_authorities_preserve_ipv6_and_reject_invalid_ports_and_userinfo() {

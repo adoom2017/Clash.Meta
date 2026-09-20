@@ -2,17 +2,18 @@
 mod api;
 pub mod dns;
 mod inbound;
+mod ntp;
 mod packet;
+mod profile;
+mod resources;
+mod sniff;
 #[cfg(test)]
 mod tests;
 mod traffic;
 
 use anyhow::{Context, Result, bail, ensure};
 use async_trait::async_trait;
-use meta_config::{
-    Config, GroupKind, Mode, ProxyKind,
-    rule::{Matcher, Rule},
-};
+use meta_config::{Config, GroupKind, Mode, ProxyKind, rule::Rule};
 use meta_platform::Hooks;
 use meta_protocol::{BoxStream, Datagram, Target};
 use serde::Serialize;
@@ -30,8 +31,6 @@ pub struct Core {
     pub resolver: Arc<dns::Resolver>,
     hooks: Hooks,
     policy: RwLock<Policy>,
-    hy2: HashMap<String, tokio::sync::Mutex<Option<Hy2Connection>>>,
-    network: Mutex<CancellationToken>,
     pub stop: CancellationToken,
     connections: Mutex<HashMap<String, Arc<traffic::State>>>,
     pub upload: AtomicU64,
@@ -39,10 +38,8 @@ pub struct Core {
     slots: Arc<tokio::sync::Semaphore>,
     lifecycle: Mutex<bool>,
     pub events: tokio::sync::broadcast::Sender<String>,
-}
-struct Hy2Connection {
-    client: Arc<meta_protocol::hysteria2::Client>,
-    network: CancellationToken,
+    resources: RwLock<Arc<resources::Resources>>,
+    clock: Arc<meta_protocol::tls::Clock>,
 }
 struct Policy {
     mode: Mode,
@@ -70,12 +67,12 @@ pub struct Running {
 }
 impl Running {
     pub async fn shutdown(mut self) {
+        if self.core.save_profile().is_err() {
+            tracing::warn!("cannot save profile");
+        }
         self.core.stop.cancel();
         self.tasks.abort_all();
         while self.tasks.join_next().await.is_some() {}
-        for client in self.core.hy2.values() {
-            client.lock().await.take();
-        }
         *self.core.lifecycle.lock().unwrap() = false;
     }
 }
@@ -90,7 +87,13 @@ impl Core {
         config.validate()?;
         let mut dns = config.dns.clone();
         dns.ipv6 &= config.ipv6;
-        let resolver = Arc::new(dns::Resolver::new(dns, hooks.clone()));
+        let clock = Arc::new(meta_protocol::tls::Clock::default());
+        let resolver = Arc::new(dns::Resolver::new_with_clock(
+            dns,
+            hooks.clone(),
+            clock.clone(),
+        ));
+        resolver.set_hosts(&config.hosts);
         let mut selection = HashMap::new();
         for group in &config.proxy_groups {
             selection.insert(group.name.clone(), group.proxies[0].clone());
@@ -108,19 +111,11 @@ impl Core {
             delay: HashMap::new(),
         };
         let (events, _) = tokio::sync::broadcast::channel(256);
-        let hy2 = config
-            .proxies
-            .iter()
-            .filter(|p| p.kind == ProxyKind::Hysteria2)
-            .map(|p| (p.name.clone(), tokio::sync::Mutex::new(None)))
-            .collect();
         Ok(Arc::new(Self {
             config,
             resolver,
             hooks,
             policy: RwLock::new(policy),
-            hy2,
-            network: Mutex::new(CancellationToken::new()),
             stop: CancellationToken::new(),
             connections: Default::default(),
             upload: AtomicU64::new(0),
@@ -128,6 +123,8 @@ impl Core {
             slots: Arc::new(tokio::sync::Semaphore::new(4096)),
             lifecycle: Mutex::new(false),
             events,
+            resources: RwLock::new(Arc::new(resources::Resources::default())),
+            clock,
         }))
     }
     pub async fn start(self: &Arc<Self>) -> Result<Running> {
@@ -160,8 +157,26 @@ impl Core {
         self: &Arc<Self>,
         packets: Option<Arc<dyn meta_platform::PacketIo>>,
     ) -> Result<Running> {
+        self.prepare_resources(false).await?;
+        self.load_profile()?;
         let mut tasks = JoinSet::new();
         let mut addresses = vec![];
+        if self.config.ntp.enable {
+            let core = self.clone();
+            tasks.spawn(async move{let mut interval=tokio::time::interval(Duration::from_secs(core.config.ntp.interval.saturating_mul(60)));loop{tokio::select!{_=core.stop.cancelled()=>break,_=interval.tick()=>{}}tokio::select!{_=core.stop.cancelled()=>break,result=core.sync_ntp()=>{if result.is_err(){tracing::warn!("NTP synchronization failed; retaining current clock offset");}}}}});
+        }
+        if self.config.profile.store_fake_ip || self.config.profile.store_selected {
+            let core = self.clone();
+            tasks.spawn(async move{let mut interval=tokio::time::interval(Duration::from_secs(5));loop{tokio::select!{_=core.stop.cancelled()=>break,_=interval.tick()=>{if core.save_profile().is_err(){tracing::warn!("cannot save profile");}}}}});
+        }
+        if self.config.geo_auto_update || !self.config.rule_providers.is_empty() {
+            let core = self.clone();
+            tasks.spawn(async move {
+                let seconds=core.config.rule_providers.values().filter(|p|p.interval>0).map(|p|p.interval).chain(std::iter::once(if core.config.geo_auto_update{core.config.geo_update_interval.saturating_mul(3600)}else{86400})).min().unwrap_or(86400).max(1);
+                let mut interval=tokio::time::interval(Duration::from_secs(seconds));interval.tick().await;
+                loop {tokio::select!{_=core.stop.cancelled()=>break,_=interval.tick()=>{}};tokio::select!{_=core.stop.cancelled()=>break,result=core.prepare_resources(true)=>{if result.is_err(){tracing::warn!("routing resource refresh failed; retaining previous snapshot");}}}}
+            });
+        }
         if let Some(packets) = packets {
             let core = self.clone();
             tasks.spawn(async move {
@@ -172,7 +187,11 @@ impl Core {
             });
         }
         let ip = if self.config.allow_lan {
-            self.config.bind_address.parse()?
+            if self.config.bind_address == "*" {
+                "0.0.0.0".parse()?
+            } else {
+                self.config.bind_address.parse()?
+            }
         } else {
             "127.0.0.1".parse()?
         };
@@ -184,7 +203,15 @@ impl Core {
             if port == 0 {
                 continue;
             }
-            let listener = tokio::net::TcpListener::bind(SocketAddr::new(ip, port)).await?;
+            let address = SocketAddr::new(ip, port);
+            let label = match kind {
+                inbound::Kind::Http => "HTTP proxy",
+                inbound::Kind::Socks => "SOCKS proxy",
+                inbound::Kind::Mixed => "mixed HTTP/SOCKS proxy",
+            };
+            let listener = tokio::net::TcpListener::bind(address)
+                .await
+                .with_context(|| format!("cannot bind {label} TCP listener at {address}"))?;
             addresses.push(listener.local_addr()?);
             let core = self.clone();
             tasks.spawn(async move {
@@ -192,8 +219,13 @@ impl Core {
             });
         }
         if self.config.dns.enable {
-            let udp = tokio::net::UdpSocket::bind(&self.config.dns.listen).await?;
-            let tcp = tokio::net::TcpListener::bind(&self.config.dns.listen).await?;
+            let address = &self.config.dns.listen;
+            let udp = tokio::net::UdpSocket::bind(address)
+                .await
+                .with_context(|| format!("cannot bind DNS UDP listener at {address}"))?;
+            let tcp = tokio::net::TcpListener::bind(address)
+                .await
+                .with_context(|| format!("cannot bind DNS TCP listener at {address}"))?;
             let core = self.clone();
             tasks.spawn(async move {
                 inbound::dns_udp(core, udp).await;
@@ -204,7 +236,9 @@ impl Core {
             });
         }
         if let Some(addr) = &self.config.external_controller {
-            let listener = tokio::net::TcpListener::bind(addr).await?;
+            let listener = tokio::net::TcpListener::bind(addr)
+                .await
+                .with_context(|| format!("cannot bind controller TCP listener at {addr}"))?;
             let core = self.clone();
             let stop = self.stop.clone();
             tasks.spawn(async move {
@@ -265,6 +299,20 @@ impl Core {
             target.clone()
         }
     }
+    pub async fn prepare_resources(&self, refresh: bool) -> Result<()> {
+        let mut config = self.config.clone();
+        config.rules = self.policy.read().unwrap().raw_rules.clone();
+        let next = Arc::new(
+            resources::Resources::load(&config, &self.resolver, &self.hooks, refresh).await?,
+        );
+        let mut resources = self.resources.write().unwrap();
+        let mut policy = self.policy.write().unwrap();
+        let rules = next.rules(&policy.raw_rules)?;
+        self.resolver.configure(&config.hosts, &next)?;
+        policy.rules = rules;
+        *resources = next;
+        Ok(())
+    }
     async fn route(&self, target: &Target, network: &str) -> Result<String> {
         let (mode, rules) = {
             let p = self.policy.read().unwrap();
@@ -278,8 +326,16 @@ impl Core {
         }
         let mut ip = target.ip();
         let mut resolved = ip.is_some();
+        let host = target.host.trim_end_matches('.').to_ascii_lowercase();
         for rule in rules {
-            if matches!(rule.matcher, Matcher::Net(_)) && !rule.no_resolve && !resolved {
+            let matched = rule.matcher.evaluate(
+                &host,
+                ip,
+                target.port,
+                network,
+                !rule.no_resolve && !resolved,
+            );
+            if matched.is_none() && !rule.no_resolve && !resolved {
                 ip = self
                     .resolver
                     .lookup(&target.host, target.port)
@@ -288,7 +344,9 @@ impl Core {
                     .and_then(|v| v.first().map(SocketAddr::ip));
                 resolved = true;
             }
-            if rule.matches(&target.host, ip, target.port, network) {
+            if matched == Some(true)
+                || (matched.is_none() && rule.matches(&host, ip, target.port, network))
+            {
                 return self.leaf(&rule.target);
             }
         }
@@ -331,6 +389,7 @@ impl Core {
             .unwrap()
             .selection
             .insert(group.into(), name.into());
+        self.save_profile()?;
         Ok(())
     }
     pub fn set_mode(&self, mode: Mode) {
@@ -351,11 +410,7 @@ impl Core {
             cfg.mode = mode.clone();
         }
         cfg.validate()?;
-        let rules = cfg
-            .rules
-            .iter()
-            .map(|r| Rule::parse(r))
-            .collect::<Result<_>>()?;
+        let rules = self.resources.read().unwrap().rules(&cfg.rules)?;
         let mut policy = self.policy.write().unwrap();
         if update_rules {
             policy.rules = rules;
@@ -375,11 +430,59 @@ impl Core {
     }
     async fn raw_tcp(&self, target: &Target) -> Result<tokio::net::TcpStream> {
         let addresses = self.resolver.lookup(&target.host, target.port).await?;
+        self.connect_addresses(addresses, false, "").await
+    }
+    async fn connect_addresses(
+        &self,
+        mut addresses: Vec<SocketAddr>,
+        tfo: bool,
+        ip_version: &str,
+    ) -> Result<tokio::net::TcpStream> {
+        match ip_version {
+            "ipv4" => addresses.retain(SocketAddr::is_ipv4),
+            "ipv6" => addresses.retain(SocketAddr::is_ipv6),
+            "ipv4-prefer" => addresses.sort_by_key(|a| a.is_ipv6()),
+            "ipv6-prefer" => addresses.sort_by_key(|a| a.is_ipv4()),
+            _ => {}
+        }
+        addresses.truncate(32);
+        if self.config.tcp_concurrent {
+            use futures_util::{StreamExt, stream::FuturesUnordered};
+            let mut attempts = FuturesUnordered::new();
+            for (index, addr) in addresses.into_iter().enumerate() {
+                attempts.push(async move {
+                    if index > 0 {
+                        tokio::time::sleep(Duration::from_millis(50 * index as u64)).await;
+                    }
+                    tokio::time::timeout(
+                        Duration::from_secs(5),
+                        meta_platform::tcp_connect_options(
+                            addr,
+                            &*self.hooks,
+                            self.config.keep_alive_interval,
+                            tfo,
+                        ),
+                    )
+                    .await
+                });
+            }
+            while let Some(result) = attempts.next().await {
+                if let Ok(Ok(stream)) = result {
+                    return Ok(stream);
+                }
+            }
+            bail!("all concurrent connection attempts failed");
+        }
         let mut last = anyhow::anyhow!("no destination address");
         for addr in addresses {
             match tokio::time::timeout(
                 Duration::from_secs(5),
-                meta_platform::tcp_connect(addr, &*self.hooks),
+                meta_platform::tcp_connect_options(
+                    addr,
+                    &*self.hooks,
+                    self.config.keep_alive_interval,
+                    tfo,
+                ),
             )
             .await
             {
@@ -390,64 +493,47 @@ impl Core {
         }
         Err(last)
     }
-    async fn hy2(
-        &self,
-        proxy: &meta_config::Proxy,
-    ) -> Result<Arc<meta_protocol::hysteria2::Client>> {
-        let network = self.network.lock().unwrap().clone();
-        tokio::select! {
-            biased;
-            _ = self.stop.cancelled() => bail!("core stopped"),
-            _ = network.cancelled() => bail!("network changed during HY2 connection"),
-            result = self.hy2_on_network(proxy, network.clone()) => result,
-        }
-    }
-    async fn hy2_on_network(
-        &self,
-        proxy: &meta_config::Proxy,
-        network: CancellationToken,
-    ) -> Result<Arc<meta_protocol::hysteria2::Client>> {
-        let mut cached = self
-            .hy2
-            .get(&proxy.name)
-            .context("HY2 proxy not found")?
-            .lock()
-            .await;
-        if let Some(client) = cached.as_ref()
-            && !client.network.is_cancelled()
-            && !client.client.is_closed()
-        {
-            return Ok(client.client.clone());
-        }
-        cached.take();
-        let remote = self
-            .resolver
-            .lookup(&proxy.server, proxy.port)
-            .await?
-            .into_iter()
-            .next()
-            .context("no HY2 server address")?;
-        let client = meta_protocol::hysteria2::Client::connect(proxy, remote, &*self.hooks).await?;
-        ensure!(
-            !network.is_cancelled(),
-            "network changed during HY2 connection"
-        );
-        *cached = Some(Hy2Connection {
-            client: client.clone(),
-            network,
-        });
-        Ok(client)
-    }
     async fn vless_stream(
         &self,
         proxy: &meta_config::Proxy,
         target: &Target,
         command: u8,
     ) -> Result<BoxStream> {
-        let socket = self
-            .raw_tcp(&Target::new(&proxy.server, proxy.port)?)
+        let mut addresses = self
+            .resolver
+            .lookup_proxy(&proxy.server, proxy.port)
             .await?;
-        meta_protocol::vless::connect(socket, proxy, target, command).await
+        addresses.truncate(32);
+        let mut last = anyhow::anyhow!("no destination address");
+        while !addresses.is_empty() {
+            let socket = match self
+                .connect_addresses(addresses.clone(), proxy.tfo, &proxy.ip_version)
+                .await
+            {
+                Ok(socket) => socket,
+                Err(error) => return Err(error),
+            };
+            let peer = socket.peer_addr().ok();
+            match meta_protocol::vless::connect_with_options(
+                socket,
+                proxy,
+                target,
+                command,
+                &self.config.global_client_fingerprint,
+                self.clock.clone(),
+            )
+            .await
+            {
+                Ok(stream) => return Ok(stream),
+                Err(error) => last = error,
+            }
+            if let Some(peer) = peer {
+                addresses.retain(|address| *address != peer);
+            } else {
+                addresses.remove(0);
+            }
+        }
+        Err(last)
     }
     pub async fn dial(
         &self,
@@ -485,8 +571,8 @@ impl Core {
                 .context("proxy not found")?;
             match p.kind {
                 ProxyKind::Vless => self.vless_stream(p, &target, 1).await,
-                ProxyKind::Hysteria2 => {
-                    Ok(Box::new(self.hy2(p).await?.tcp(&target).await?) as BoxStream)
+                ProxyKind::Hysteria2 | ProxyKind::Trojan => {
+                    bail!("configured outbound protocol is unavailable in this build")
                 }
             }
         })
@@ -559,7 +645,9 @@ impl Core {
                     )))
                 }
             }
-            ProxyKind::Hysteria2 => self.hy2(proxy).await?.udp(),
+            ProxyKind::Hysteria2 | ProxyKind::Trojan => {
+                bail!("configured outbound protocol is unavailable in this build")
+            }
         }
     }
     pub async fn relay(
@@ -615,27 +703,14 @@ impl Core {
         }
     }
     pub async fn network_changed(&self) {
-        {
-            let mut network = self.network.lock().unwrap();
-            network.cancel();
-            *network = CancellationToken::new();
-        }
         for connection in self.connections() {
             connection.cancel.cancel();
-        }
-        for client in self.hy2.values() {
-            // Establishment owns this lock until cancellation is observed. Do not
-            // wait for it, or discard a connection made on the new network.
-            if let Ok(mut cached) = client.try_lock()
-                && cached.as_ref().is_some_and(|c| c.network.is_cancelled())
-            {
-                cached.take();
-            }
         }
         self.resolver.clear_cache();
     }
     pub async fn probe(&self, name: &str, url: &str, timeout: Duration) -> Result<u64> {
         let start = Instant::now();
+        let mut measured = start;
         let operation = async {
             let uri: http::Uri = url.parse()?;
             let secure = uri.scheme_str() == Some("https");
@@ -646,18 +721,24 @@ impl Core {
             let target = Target::from_uri(&uri, if secure { 443 } else { 80 })?;
             let (stream, _) = self.dial(&target, Some(name)).await?;
             let mut stream: BoxStream = if secure {
-                let cfg = meta_protocol::tls::config(&["http/1.1".into()], false)?;
-                Box::new(
-                    tokio_rustls::TlsConnector::from(Arc::new(cfg))
-                        .connect(
-                            rustls::pki_types::ServerName::try_from(target.host.clone())?,
-                            stream,
-                        )
-                        .await?,
-                )
+                meta_protocol::tls::SecureConnector::new(self.clock.clone())
+                    .connect(
+                        stream,
+                        &meta_protocol::tls::TlsConnectConfig {
+                            server_name: target.host.clone(),
+                            alpn: vec!["http/1.1".into()],
+                            verify_cert: true,
+                            fingerprint: meta_protocol::tls::TlsFingerprint::Native,
+                            reality: None,
+                        },
+                    )
+                    .await?
             } else {
                 stream
             };
+            if self.config.unified_delay {
+                measured = Instant::now();
+            }
             let path = uri.path_and_query().map(|p| p.as_str()).unwrap_or("/");
             stream
                 .write_all(
@@ -675,7 +756,7 @@ impl Core {
             _ = self.stop.cancelled() => bail!("core stopped"),
             result = tokio::time::timeout(timeout, operation) => result??,
         }
-        let elapsed = start.elapsed().as_millis() as u64;
+        let elapsed = measured.elapsed().as_millis() as u64;
         self.policy
             .write()
             .unwrap()

@@ -36,6 +36,9 @@ pub fn router(core: Arc<Core>) -> Router {
         .route("/connections/{id}", delete(close))
         .route("/traffic", get(traffic))
         .route("/logs", get(logs))
+        .route("/ui", get(ui_index))
+        .route("/ui/", get(ui_index))
+        .route("/ui/{*file}", get(ui_file))
         .layer(middleware::from_fn_with_state(core.clone(), authorize))
         .with_state(core)
 }
@@ -44,7 +47,8 @@ async fn authorize(
     request: Request<axum::body::Body>,
     next: Next,
 ) -> Response {
-    if !core.config.secret.is_empty() {
+    let ui = request.uri().path() == "/ui" || request.uri().path().starts_with("/ui/");
+    if !ui && !core.config.secret.is_empty() {
         let expected = format!("Bearer {}", core.config.secret);
         let got = request
             .headers()
@@ -64,6 +68,48 @@ async fn authorize(
         }
     }
     next.run(request).await
+}
+async fn ui_index(State(core): State<Arc<Core>>) -> Response {
+    serve_ui(core, "index.html".into()).await
+}
+async fn ui_file(State(core): State<Arc<Core>>, Path(file): Path<String>) -> Response {
+    serve_ui(core, file).await
+}
+async fn serve_ui(core: Arc<Core>, file: String) -> Response {
+    async fn read(core: &Core, file: &str) -> anyhow::Result<(Vec<u8>, &'static str)> {
+        anyhow::ensure!(!core.config.external_ui.is_empty(), "UI disabled");
+        let configured =
+            crate::resources::asset_path(&core.config.directory, &core.config.external_ui)?;
+        let root = tokio::fs::canonicalize(configured).await?;
+        let path = tokio::fs::canonicalize(root.join(file)).await?;
+        anyhow::ensure!(
+            path.starts_with(&root) && tokio::fs::metadata(&path).await?.len() <= 16 * 1024 * 1024,
+            "invalid UI resource"
+        );
+        let mime = match path.extension().and_then(|v| v.to_str()).unwrap_or("") {
+            "html" => "text/html; charset=utf-8",
+            "js" | "mjs" => "text/javascript; charset=utf-8",
+            "css" => "text/css; charset=utf-8",
+            "json" => "application/json",
+            "svg" => "image/svg+xml",
+            "png" => "image/png",
+            "ico" => "image/x-icon",
+            "woff2" => "font/woff2",
+            _ => "application/octet-stream",
+        };
+        Ok((tokio::fs::read(path).await?, mime))
+    }
+    match read(&core, &file).await {
+        Ok((data, mime)) => (
+            [
+                ("content-type", mime),
+                ("x-content-type-options", "nosniff"),
+            ],
+            data,
+        )
+            .into_response(),
+        Err(_) => StatusCode::NOT_FOUND.into_response(),
+    }
 }
 async fn config(State(core): State<Arc<Core>>) -> Json<Value> {
     Json(core.configuration())
@@ -100,7 +146,7 @@ fn proxy_map(core: &Core) -> serde_json::Map<String, Value> {
         );
     }
     for p in &core.config.proxies {
-        output.insert(p.name.clone(),json!({"name":p.name,"type":match p.kind{meta_config::ProxyKind::Vless=>"VLESS",meta_config::ProxyKind::Hysteria2=>"Hysteria2"},"udp":p.udp,"history":policy.delay.get(&p.name).map(|d|vec![json!({"delay":d})]).unwrap_or_default()}));
+        output.insert(p.name.clone(),json!({"name":p.name,"type":match p.kind{meta_config::ProxyKind::Vless=>"VLESS",meta_config::ProxyKind::Hysteria2=>"Hysteria2",meta_config::ProxyKind::Trojan=>"Unsupported"},"udp":p.udp,"history":policy.delay.get(&p.name).map(|d|vec![json!({"delay":d})]).unwrap_or_default()}));
     }
     for g in &core.config.proxy_groups {
         output.insert(g.name.clone(),json!({"name":g.name,"type":if g.kind==meta_config::GroupKind::Select{"Selector"}else{"URLTest"},"all":g.proxies,"now":policy.selection.get(&g.name),"history":[]}));

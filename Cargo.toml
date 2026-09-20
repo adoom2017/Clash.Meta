@@ -27,16 +27,17 @@ cfb-mode = "0.8"
 zeroize = { version = "1", features = ["derive"] }
 ipnet = { version = "2", features = ["serde"] }
 rand = "0.8"
-rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
-tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
-webpki-roots = "1"
-quinn = { version = "0.11", default-features = false, features = ["runtime-tokio", "rustls-ring"] }
-h3 = "0.0.8"
-h3-quinn = "0.0.10"
+boring = "=5.2.0"
+boring-sys = "=5.2.0"
+tokio-boring = "=5.2.0"
+webpki-root-certs = "1.0.9"
 http = "1"
 blake2 = "0.10"
 tracing = "0.1"
 socket2 = { version = "0.6", features = ["all"] }
+brotli = "8.0.2"
+flate2 = "1.1.9"
+zstd = "0.13.3"
 meta-config = { path = "crates/config" }
 meta-protocol = { path = "crates/protocol" }
 meta-platform = { path = "crates/platform" }
@@ -49,6 +50,5 @@ strip = "symbols"
 panic = "unwind"
 
 [patch.crates-io]
-rustls = { path = "third-party/rustls" }
-quinn-proto = { path = "third-party/quinn-proto" }
+boring-sys = { path = "third-party/boring-sys" }
 route_manager = { path = "third-party/route_manager" }

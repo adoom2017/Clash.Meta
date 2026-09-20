@@ -1,8 +1,4 @@
 {
-  "hysteria2_frames": {
-    "golden": "010203040506000104613a35332a",
-    "invalid-index": "010203040506020204613a35332a"
-  },
   "vless_frames": {
     "ipv4": "0053017f000001",
     "domain": "01bb020b6578616d706c652e636f6d",

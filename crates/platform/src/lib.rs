@@ -37,12 +37,47 @@ pub async fn tcp_connect(
     addr: SocketAddr,
     hooks: &dyn PlatformHooks,
 ) -> Result<tokio::net::TcpStream> {
+    tcp_connect_options(addr, hooks, 30, false).await
+}
+pub async fn tcp_connect_options(
+    addr: SocketAddr,
+    hooks: &dyn PlatformHooks,
+    keep_alive: u64,
+    fast_open: bool,
+) -> Result<tokio::net::TcpStream> {
     let socket = socket2::Socket::new(
         socket2::Domain::for_address(addr),
         socket2::Type::STREAM,
         Some(socket2::Protocol::TCP),
     )?;
     socket.set_nonblocking(true)?;
+    if keep_alive > 0 {
+        socket.set_tcp_keepalive(
+            &socket2::TcpKeepalive::new()
+                .with_time(std::time::Duration::from_secs(keep_alive))
+                .with_interval(std::time::Duration::from_secs(keep_alive)),
+        )?;
+    }
+    #[cfg(windows)]
+    if fast_open {
+        use std::os::windows::io::AsRawSocket;
+        use windows_sys::Win32::Networking::WinSock::{IPPROTO_TCP, TCP_FASTOPEN, setsockopt};
+        let enabled: i32 = 1;
+        let result = unsafe {
+            setsockopt(
+                socket.as_raw_socket() as _,
+                IPPROTO_TCP,
+                TCP_FASTOPEN,
+                (&enabled as *const i32).cast(),
+                std::mem::size_of::<i32>() as i32,
+            )
+        };
+        if result != 0 {
+            tracing::debug!("TCP Fast Open unavailable; using normal TCP handshake");
+        }
+    }
+    #[cfg(not(windows))]
+    let _ = fast_open;
     hooks.prepare_socket(&socket, Some(addr))?;
     let stream: std::net::TcpStream = socket.into();
     let socket = tokio::net::TcpSocket::from_std_stream(stream);

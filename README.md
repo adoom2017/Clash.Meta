@@ -4,16 +4,17 @@ Rust proxy core, CLI, desktop TUN adapter and versioned C host API. This branch
 replaces the Go product; the previous implementation remains on `Alpha` and in
 Git history. The rewrite's acceptance status is in [docs/rust-progress.md](docs/rust-progress.md).
 
-Protocol code is maintained here: VLESS TCP/TLS, REALITY, XTLS Vision, UDP/XUDP;
-Hysteria 2 TCP/UDP, Salamander, port hopping and negotiated upload pacing. The
-production dependency tree contains general-purpose libraries, no external proxy
-core. Xray and official Hysteria binaries are isolated test oracles only.
+Protocol code is maintained here for VLESS TCP, WebSocket and gRPC, with TLS,
+REALITY, XTLS Vision and UDP/XUDP. BoringSSL is the only TLS backend. Trojan and
+Hysteria2 entries remain parseable for configuration/group compatibility, but
+selecting either protocol returns an explicit unavailable-protocol error.
 
 ## Build and Run
 
-Install Rust 1.93.1 with the platform C/C++ compiler. The checked-in toolchain and
-Cargo.lock pin the build. Windows targets x64, macOS 12+ targets Intel/Apple
-Silicon; Linux is retained. Mobile scope is core/FFI integration interfaces.
+Install Rust 1.93.1 with the platform C/C++ compiler. BoringSSL additionally
+requires CMake, NASM and LLVM/libclang on Windows; the vendored build discovers
+`libclang.dll` beside `clang.exe`. The checked-in toolchain and Cargo.lock pin the
+build.
 
 ```sh
 cargo build --release --locked
@@ -24,8 +25,8 @@ cargo clippy --workspace --all-targets --locked -- -D warnings
 ```
 
 Use `target/release/meta-rust.exe` on Windows. Set actual server credentials in a
-configuration based on [examples/vless.yaml](examples/vless.yaml) or
-[examples/hysteria2.yaml](examples/hysteria2.yaml). No production server is bundled.
+configuration based on [examples/vless.yaml](examples/vless.yaml). No production
+server is bundled.
 
 HTTP/CONNECT, SOCKS5 and mixed listeners share rules, select/url-test groups,
 DNS/fake-IP and traffic accounting. The reduced controller defaults to loopback;
@@ -56,7 +57,7 @@ rotation and controller events without exposing configured credentials.
   physical egress, route recovery, network changes, packet/fd ownership and tests.
 - [Compatibility subset](docs/compatibility.md): supported configuration and API.
 - [Core runtime](docs/core-runtime.md): lifecycle, resource limits, DNS and updates.
-- [VLESS verification](docs/vless-protocol.md) and [HY2 verification](docs/hysteria2-protocol.md).
+- [VLESS verification](docs/vless-protocol.md) and [unsupported protocol behavior](docs/hysteria2-protocol.md).
 - [Offline source archives](docs/offline-build.md) and [third-party patches](third-party/README.md).
 - [Local release packages](docs/release.md): CLI, host libraries, licenses and hashes.
 

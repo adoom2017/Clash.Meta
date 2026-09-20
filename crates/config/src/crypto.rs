@@ -26,9 +26,15 @@ pub fn encrypt(plaintext: &[u8], password: &str) -> Result<String> {
     let key = key(password);
     let mut bytes = plaintext.to_vec();
     match key.len() {
-        16 => cfb_mode::Encryptor::<aes::Aes128>::new_from_slices(&key, &IV)?.encrypt(&mut bytes),
-        24 => cfb_mode::Encryptor::<aes::Aes192>::new_from_slices(&key, &IV)?.encrypt(&mut bytes),
-        32 => cfb_mode::Encryptor::<aes::Aes256>::new_from_slices(&key, &IV)?.encrypt(&mut bytes),
+        16 => cfb_mode::Encryptor::<aes::Aes128>::new_from_slices(&key, &IV)
+            .map_err(|_| anyhow::anyhow!("invalid AES key/IV length"))?
+            .encrypt(&mut bytes),
+        24 => cfb_mode::Encryptor::<aes::Aes192>::new_from_slices(&key, &IV)
+            .map_err(|_| anyhow::anyhow!("invalid AES key/IV length"))?
+            .encrypt(&mut bytes),
+        32 => cfb_mode::Encryptor::<aes::Aes256>::new_from_slices(&key, &IV)
+            .map_err(|_| anyhow::anyhow!("invalid AES key/IV length"))?
+            .encrypt(&mut bytes),
         _ => unreachable!(),
     }
     Ok(STANDARD.encode(bytes))
@@ -41,9 +47,15 @@ pub fn decrypt(ciphertext: &[u8], password: &str) -> Result<Zeroizing<Vec<u8>>> 
     let key = key(password);
     let mut bytes = Zeroizing::new(STANDARD.decode(ciphertext)?);
     match key.len() {
-        16 => cfb_mode::Decryptor::<aes::Aes128>::new_from_slices(&key, &IV)?.decrypt(&mut bytes),
-        24 => cfb_mode::Decryptor::<aes::Aes192>::new_from_slices(&key, &IV)?.decrypt(&mut bytes),
-        32 => cfb_mode::Decryptor::<aes::Aes256>::new_from_slices(&key, &IV)?.decrypt(&mut bytes),
+        16 => cfb_mode::Decryptor::<aes::Aes128>::new_from_slices(&key, &IV)
+            .map_err(|_| anyhow::anyhow!("invalid AES key/IV length"))?
+            .decrypt(&mut bytes),
+        24 => cfb_mode::Decryptor::<aes::Aes192>::new_from_slices(&key, &IV)
+            .map_err(|_| anyhow::anyhow!("invalid AES key/IV length"))?
+            .decrypt(&mut bytes),
+        32 => cfb_mode::Decryptor::<aes::Aes256>::new_from_slices(&key, &IV)
+            .map_err(|_| anyhow::anyhow!("invalid AES key/IV length"))?
+            .decrypt(&mut bytes),
         _ => unreachable!(),
     }
     Ok(bytes)
