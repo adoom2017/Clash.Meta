@@ -69,10 +69,16 @@ async fn scenario() -> Result<()> {
     let reservations = [
         std::net::TcpListener::bind("127.0.0.1:0")?,
         std::net::TcpListener::bind("127.0.0.1:0")?,
+        std::net::TcpListener::bind("127.0.0.1:0")?,
+        std::net::TcpListener::bind("127.0.0.1:0")?,
     ];
     let ports = [
         reservations[0].local_addr()?.port(),
         reservations[1].local_addr()?.port(),
+    ];
+    let transport_ports = [
+        reservations[2].local_addr()?.port(),
+        reservations[3].local_addr()?.port(),
     ];
     let id = uuid::Uuid::from_u128(0x112233445566778899aabbccddeeff00);
     let vision_id = uuid::Uuid::from_u128(0x112233445566778899aabbccddeeff01);
@@ -86,6 +92,16 @@ async fn scenario() -> Result<()> {
         }
         inbounds.push(inbound);
     }
+    inbounds.push(serde_json::json!({
+        "listen":"127.0.0.1","port":transport_ports[0],"protocol":"vless",
+        "settings":{"clients":[{"id":id}],"decryption":"none"},
+        "streamSettings":{"network":"ws","security":"none","wsSettings":{"path":"/transport"}}
+    }));
+    inbounds.push(serde_json::json!({
+        "listen":"127.0.0.1","port":transport_ports[1],"protocol":"vless",
+        "settings":{"clients":[{"id":id}],"decryption":"none"},
+        "streamSettings":{"network":"grpc","security":"none","grpcSettings":{"serviceName":"custom"}}
+    }));
     let path = tmp.path().join("xray.json");
     std::fs::write(
         &path,
@@ -104,7 +120,7 @@ async fn scenario() -> Result<()> {
             .stderr(Stdio::from(log))
             .spawn()?,
     );
-    for port in ports {
+    for port in ports.into_iter().chain(transport_ports) {
         let mut ready = false;
         for _ in 0..100 {
             if TcpStream::connect(("127.0.0.1", port)).await.is_ok() {
@@ -253,6 +269,71 @@ async fn scenario() -> Result<()> {
                     "untrusted TLS certificate accepted"
                 );
             }
+        }
+        for (network, port) in [("ws", transport_ports[0]), ("grpc", transport_ports[1])] {
+            eprintln!("{network} TCP/XUDP host={host}");
+            let mut value = serde_json::json!({
+                "name":format!("{network}-oracle"),"type":"vless","server":"127.0.0.1",
+                "port":port,"uuid":id,"network":network
+            });
+            if network == "ws" {
+                value["ws-opts"] = serde_json::json!({"path":"/transport"});
+            } else {
+                value["grpc-opts"] = serde_json::json!({"grpc-service-name":"custom"});
+            }
+            let proxy: meta_config::Proxy = serde_json::from_value(value)?;
+            let target = Target::new(host, tcp_port)?;
+            let socket = TcpStream::connect(("127.0.0.1", port)).await?;
+            let mut stream = match tokio::time::timeout(
+                Duration::from_secs(8),
+                vless::connect(socket, &proxy, &target, 1),
+            )
+            .await
+            {
+                Ok(result) => result?,
+                Err(_) => anyhow::bail!(
+                    "{network} TCP connect timeout; oracle log: {}",
+                    std::fs::read_to_string(&log_path)?
+                ),
+            };
+            eprintln!("{network} TCP connected host={host}");
+            let payload = vec![31; 64 * 1024];
+            tokio::time::timeout(Duration::from_secs(8), async {
+                stream.write_all(&payload).await?;
+                stream.flush().await
+            })
+            .await
+            .with_context(|| format!("{network} TCP upload timeout"))??;
+            let mut reply = vec![0; payload.len()];
+            tokio::time::timeout(Duration::from_secs(8), stream.read_exact(&mut reply))
+                .await
+                .with_context(|| format!("{network} TCP reply timeout"))??;
+            ensure!(
+                reply == payload,
+                "{network} TCP echo failed target={target}"
+            );
+            eprintln!("{network} TCP echoed host={host}");
+            drop(stream);
+
+            let target = Target::new(host, udp_port)?;
+            let socket = TcpStream::connect(("127.0.0.1", port)).await?;
+            let stream = tokio::time::timeout(
+                Duration::from_secs(8),
+                vless::connect(socket, &proxy, &target, 3),
+            )
+            .await
+            .with_context(|| format!("{network} XUDP connect timeout"))??;
+            eprintln!("{network} XUDP connected host={host}");
+            let session = xudp::Session::new(stream, target.clone());
+            let payload = vec![47; 8192];
+            session.send(&target, &payload).await?;
+            let (source, reply) = tokio::time::timeout(Duration::from_secs(8), session.recv())
+                .await
+                .with_context(|| format!("{network} XUDP reply timeout target={target}"))??;
+            ensure!(
+                source == target && reply == payload,
+                "{network} XUDP echo failed target={target}"
+            );
         }
     }
     Ok(())

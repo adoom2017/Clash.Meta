@@ -7,14 +7,14 @@ use anyhow::{Result, ensure};
 use boring::{
     ssl::{
         CertificateCompressionAlgorithm, CertificateCompressor, SslConnector, SslMethod,
-        SslOptions, SslSessionCacheMode, SslVerifyMode, SslVersion,
+        SslOptions, SslSession, SslSessionCacheMode, SslVerifyMode, SslVersion,
     },
     x509::X509,
 };
 use foreign_types_shared::ForeignType;
 use rand::seq::SliceRandom;
 use std::{
-    collections::HashMap,
+    collections::{HashMap, VecDeque},
     sync::{Arc, Mutex, OnceLock},
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -383,7 +383,11 @@ fn profile(kind: TlsFingerprint) -> BrowserProfile {
         browser_version: version,
         source,
         fixture_sha256,
-        default_alpn: &["h2", "http/1.1"],
+        default_alpn: if kind == TlsFingerprint::Native {
+            &[]
+        } else {
+            &["h2", "http/1.1"]
+        },
         tls: TlsProfile {
             cipher_list: ciphers,
             curves,
@@ -438,8 +442,25 @@ struct ContextKey {
     profile: TlsFingerprint,
     alpn: Vec<String>,
     verify: bool,
+    server_name: String,
 }
 static CONTEXTS: OnceLock<Mutex<HashMap<ContextKey, SslConnector>>> = OnceLock::new();
+static SESSIONS: OnceLock<Mutex<VecDeque<(ContextKey, SslSession)>>> = OnceLock::new();
+
+fn store_session(key: ContextKey, session: SslSession) {
+    let mut sessions = SESSIONS.get_or_init(Default::default).lock().unwrap();
+    sessions.retain(|(stored, _)| stored != &key);
+    sessions.push_back((key, session));
+    while sessions.len() > 256 {
+        sessions.pop_front();
+    }
+}
+
+fn take_session(key: &ContextKey) -> Option<SslSession> {
+    let mut sessions = SESSIONS.get_or_init(Default::default).lock().unwrap();
+    let index = sessions.iter().rposition(|(stored, _)| stored == key)?;
+    sessions.remove(index).map(|(_, session)| session)
+}
 
 fn alpn_wire(alpn: &[String]) -> Result<Vec<u8>> {
     let mut wire = Vec::new();
@@ -459,6 +480,7 @@ fn build_connector(
     alpn: &[String],
     verify: bool,
     reality: bool,
+    session_key: Option<ContextKey>,
 ) -> Result<SslConnector> {
     let mut builder = SslConnector::builder(SslMethod::tls())?;
     builder.set_min_proto_version(Some(if reality {
@@ -483,6 +505,9 @@ fn build_connector(
         SslSessionCacheMode::CLIENT
     });
     builder.set_session_cache_size(256);
+    if let Some(key) = session_key {
+        builder.set_new_session_callback(move |_, session| store_session(key.clone(), session));
+    }
     if !profile.tls.session_ticket {
         builder.set_options(SslOptions::NO_TICKET);
     }
@@ -512,7 +537,14 @@ fn build_connector(
     Ok(builder.build())
 }
 
-fn connector(config: &TlsConnectConfig) -> Result<(SslConnector, BrowserProfile, Vec<String>)> {
+fn connector(
+    config: &TlsConnectConfig,
+) -> Result<(
+    SslConnector,
+    BrowserProfile,
+    Vec<String>,
+    Option<ContextKey>,
+)> {
     let selected = config.fingerprint.resolve();
     let profile = if selected == TlsFingerprint::Randomized {
         randomized_profile()
@@ -530,45 +562,61 @@ fn connector(config: &TlsConnectConfig) -> Result<(SslConnector, BrowserProfile,
     };
     if config.reality.is_some() {
         return Ok((
-            build_connector(&profile, &alpn, false, true)?,
+            build_connector(&profile, &alpn, false, true, None)?,
             profile,
             alpn,
+            None,
         ));
     }
     if selected == TlsFingerprint::Randomized {
         return Ok((
-            build_connector(&profile, &alpn, config.verify_cert, false)?,
+            build_connector(&profile, &alpn, config.verify_cert, false, None)?,
             profile,
             alpn,
+            None,
         ));
     }
     let key = ContextKey {
         profile: selected,
         alpn: alpn.clone(),
         verify: config.verify_cert,
+        server_name: config.server_name.clone(),
     };
     let cache = CONTEXTS.get_or_init(Default::default);
     if let Some(found) = cache.lock().unwrap().get(&key).cloned() {
-        return Ok((found, profile, alpn));
+        return Ok((found, profile, alpn, Some(key)));
     }
-    let built = build_connector(&profile, &alpn, config.verify_cert, false)?;
+    let built = build_connector(
+        &profile,
+        &alpn,
+        config.verify_cert,
+        false,
+        Some(key.clone()),
+    )?;
     let result = built.clone();
     let mut cache = cache.lock().unwrap();
     if cache.len() >= 64 {
         cache.clear();
     }
-    cache.insert(key, built);
-    Ok((result, profile, alpn))
+    cache.insert(key.clone(), built);
+    Ok((result, profile, alpn, Some(key)))
 }
 
 fn configure_ssl(
     config: &TlsConnectConfig,
     clock: &Arc<Clock>,
 ) -> Result<(boring::ssl::Ssl, BrowserProfile)> {
-    let (connector, profile, alpn) = connector(config)?;
+    let (connector, profile, alpn, session_key) = connector(config)?;
     let mut configured = connector.configure()?;
     configured.set_verify_hostname(config.verify_cert && config.reality.is_none());
     let mut ssl = configured.into_ssl(&config.server_name)?;
+    if let Some(key) = session_key.as_ref()
+        && let Some(session) = take_session(key)
+    {
+        // SAFETY: the cached session came from the same server/profile/ALPN and
+        // verification context. BoringSSL takes its own reference on success.
+        unsafe { ssl.set_session(&session)? };
+    }
     if config.reality.is_some() {
         // REALITY deliberately uses an ephemeral certificate whose Ed25519
         // signature bytes carry an HMAC. Let the handshake receive that
@@ -720,6 +768,10 @@ pub async fn connect(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use boring::{
+        pkey::PKey,
+        ssl::{SslAcceptor, SslSessionCacheMode},
+    };
     use sha2::{Digest, Sha256};
     use tokio::io::AsyncReadExt;
 
@@ -1070,5 +1122,45 @@ mod tests {
                 profile(fingerprint).fixture_sha256
             );
         }
+    }
+
+    #[tokio::test]
+    async fn ordinary_tls_resumes_a_cached_session() -> Result<()> {
+        let cert = rcgen::generate_simple_self_signed(vec!["resume.test".into()])?;
+        let certificate = X509::from_der(cert.cert.der().as_ref())?;
+        let key = PKey::private_key_from_pkcs8(&cert.signing_key.serialize_der())?;
+        let mut server = SslAcceptor::mozilla_intermediate_v5(SslMethod::tls())?;
+        server.set_certificate(&certificate)?;
+        server.set_private_key(&key)?;
+        server.set_min_proto_version(Some(SslVersion::TLS1_2))?;
+        server.set_max_proto_version(Some(SslVersion::TLS1_2))?;
+        server.set_session_cache_mode(SslSessionCacheMode::SERVER);
+        server.set_session_id_context(b"meta-rust-session-test")?;
+        let server = server.build();
+        let config = TlsConnectConfig {
+            server_name: format!("resume-{}.test", rand::random::<u64>()),
+            alpn: vec!["http/1.1".into()],
+            verify_cert: false,
+            fingerprint: TlsFingerprint::Native,
+            reality: None,
+        };
+        for expected in [false, true] {
+            let (client, peer) = tokio::io::duplex(64 * 1024);
+            let server = server.clone();
+            let task = tokio::spawn(async move {
+                tokio_boring::accept(&server, peer)
+                    .await
+                    .map_err(|error| anyhow::anyhow!(error.to_string()))
+            });
+            let (ssl, _) = configure_ssl(&config, &Arc::new(Clock::default()))?;
+            let stream = tokio_boring::SslStreamBuilder::new(ssl, Box::new(client) as BoxStream)
+                .connect()
+                .await
+                .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+            assert_eq!(stream.ssl().session_reused(), expected);
+            drop(stream);
+            task.await??;
+        }
+        Ok(())
     }
 }

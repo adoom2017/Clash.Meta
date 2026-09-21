@@ -96,6 +96,37 @@ pub async fn connect_with_options<S: AsyncRead + AsyncWrite + Unpin + Send + 'st
         return Ok(Box::new(crate::vision::VisionStream::new(stream, id)?));
     }
     let connector = crate::tls::SecureConnector::new(clock);
+    if proxy.network == "grpc" {
+        let endpoint = Target::new(&proxy.server, proxy.port)?.to_string();
+        let http_authority = proxy
+            .servername
+            .as_deref()
+            .or(proxy.sni.as_deref())
+            .map(str::to_owned)
+            .unwrap_or_else(|| endpoint.clone());
+        let transport_identity = format!(
+            "{}|{}|{}|{:?}|{}|{:?}",
+            proxy.name,
+            tls.server_name,
+            tls.verify_cert,
+            tls.fingerprint,
+            tls.alpn.join(","),
+            tls.reality
+        );
+        let tls_transport = secure.then(|| (tls.clone(), connector.clock()));
+        let mut stream = crate::grpc::connect(
+            socket,
+            &endpoint,
+            &http_authority,
+            &proxy.grpc_opts,
+            tls_transport,
+            &transport_identity,
+        )
+        .await?;
+        stream.write_all(&header).await?;
+        stream.flush().await?;
+        return Ok(Box::new(ResponseStream::new(stream)));
+    }
     let mut stream = if secure {
         connector.connect(socket, &tls).await?
     } else {
@@ -111,9 +142,7 @@ pub async fn connect_with_options<S: AsyncRead + AsyncWrite + Unpin + Send + 'st
             stream = connected.0;
             consumed = connected.1;
         }
-        "grpc" => {
-            stream = crate::grpc::connect(stream, &authority, &proxy.grpc_opts, secure).await?;
-        }
+        "grpc" => unreachable!("gRPC is connected before generic TLS"),
         _ => anyhow::bail!("unsupported VLESS network: {}", proxy.network),
     }
     stream.write_all(&header[consumed..]).await?;
@@ -317,6 +346,8 @@ impl Datagram for UdpSession {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use anyhow::Context as _;
+    use bytes::{Buf, Bytes};
     #[test]
     fn golden_request() {
         let req = request(
@@ -373,5 +404,139 @@ mod tests {
             assert!(stream.read_u8().await.is_err());
             assert!(stream.read_u8().await.is_err());
         }
+    }
+
+    #[tokio::test]
+    async fn grpc_transport_uses_sni_authority_and_vless_framing() -> Result<()> {
+        let mut proxy = meta_config::Config::parse(
+            b"proxies:\n- name: grpc-e2e\n  type: vless\n  server: 192.0.2.1\n  port: 443\n  uuid: 11223344-5566-7788-99aa-bbccddeeff00\n  network: grpc\n  servername: front.example\n  grpc-opts:\n    grpc-service-name: custom\n",
+        )?
+        .proxies
+        .remove(0);
+        proxy.tls = false;
+        let target = Target::new("example.com", 80)?;
+        let expected = request(proxy.uuid.unwrap(), &target, 1, "")?;
+        let (client, server) = tokio::io::duplex(64 * 1024);
+        let (done_tx, mut done_rx) = tokio::sync::oneshot::channel();
+        let server_task = tokio::spawn(async move {
+            let mut connection = h2::server::handshake(server).await?;
+            let (request, mut respond) = connection.accept().await.context("missing request")??;
+            ensure!(
+                request
+                    .uri()
+                    .authority()
+                    .is_some_and(|v| v == "front.example")
+            );
+            ensure!(request.uri().path() == "/custom/Tun");
+            let handler = tokio::spawn(async move {
+                let mut body = request.into_body();
+                let response = http::Response::builder().status(200).body(())?;
+                let mut send = respond.send_response(response, false)?;
+                let mut encoded = Vec::new();
+                loop {
+                    let mut chunk = body.data().await.context("gRPC request ended")??;
+                    let size = chunk.remaining();
+                    encoded.extend_from_slice(chunk.chunk());
+                    chunk.advance(size);
+                    body.flow_control().release_capacity(size)?;
+                    if encoded.len() >= 5 {
+                        let size = u32::from_be_bytes(encoded[1..5].try_into().unwrap()) as usize;
+                        if encoded.len() >= 5 + size {
+                            break;
+                        }
+                    }
+                }
+                ensure!(encoded[0] == 0 && encoded[5] == 0x0a);
+                let payload_len = encoded[6] as usize;
+                ensure!(&encoded[7..7 + payload_len] == expected);
+                let reply = [0u8, 0, b'o', b'k'];
+                let mut proto = vec![0x0a, reply.len() as u8];
+                proto.extend_from_slice(&reply);
+                let mut frame = vec![0];
+                frame.extend_from_slice(&(proto.len() as u32).to_be_bytes());
+                frame.extend_from_slice(&proto);
+                send.send_data(Bytes::from(frame), true)?;
+                Ok::<_, anyhow::Error>(())
+            });
+            tokio::pin!(handler);
+            let mut handler_done = false;
+            loop {
+                tokio::select! {
+                    result = &mut handler, if !handler_done => { result??; handler_done = true; }
+                    _ = &mut done_rx, if handler_done => break,
+                    incoming = connection.accept() => ensure!(incoming.is_none(), "unexpected second request"),
+                }
+            }
+            Ok::<_, anyhow::Error>(())
+        });
+        let mut stream = connect(client, &proxy, &target, 1).await?;
+        let mut reply = [0; 2];
+        stream.read_exact(&mut reply).await?;
+        ensure!(&reply == b"ok");
+        let _ = done_tx.send(());
+        server_task.await??;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn websocket_transport_carries_vless_binary_stream() -> Result<()> {
+        use base64::{Engine as _, engine::general_purpose::STANDARD};
+        use sha1::{Digest as _, Sha1};
+        let proxy = meta_config::Config::parse(
+            b"proxies:\n- name: ws-e2e\n  type: vless\n  server: origin.example\n  port: 80\n  uuid: 11223344-5566-7788-99aa-bbccddeeff00\n  network: ws\n  ws-opts:\n    path: /transport\n    headers:\n      Host: front.example\n",
+        )?
+        .proxies
+        .remove(0);
+        let target = Target::new("example.com", 80)?;
+        let expected = request(proxy.uuid.unwrap(), &target, 1, "")?;
+        let (client, mut server) = tokio::io::duplex(64 * 1024);
+        let server_task = tokio::spawn(async move {
+            let mut headers = Vec::new();
+            while !headers.windows(4).any(|bytes| bytes == b"\r\n\r\n") {
+                headers.push(server.read_u8().await?);
+            }
+            let headers = String::from_utf8(headers)?;
+            ensure!(headers.starts_with("GET /transport HTTP/1.1\r\n"));
+            ensure!(headers.contains("\r\nHost: front.example\r\n"));
+            let key = headers
+                .lines()
+                .find_map(|line| line.strip_prefix("Sec-WebSocket-Key: "))
+                .context("missing WebSocket key")?;
+            let accept = STANDARD.encode(Sha1::digest(
+                format!("{key}258EAFA5-E914-47DA-95CA-C5AB0DC85B11").as_bytes(),
+            ));
+            server
+                .write_all(
+                    format!(
+                        "HTTP/1.1 101 Switching Protocols\r\nSec-WebSocket-Accept: {accept}\r\n\r\n"
+                    )
+                    .as_bytes(),
+                )
+                .await?;
+            ensure!(server.read_u8().await? == 0x82);
+            let marker = server.read_u8().await?;
+            ensure!(marker & 0x80 != 0);
+            let length = match marker & 0x7f {
+                value @ 0..=125 => usize::from(value),
+                126 => usize::from(server.read_u16().await?),
+                _ => server.read_u64().await? as usize,
+            };
+            let mut mask = [0; 4];
+            server.read_exact(&mut mask).await?;
+            let mut payload = vec![0; length];
+            server.read_exact(&mut payload).await?;
+            for (index, byte) in payload.iter_mut().enumerate() {
+                *byte ^= mask[index % 4];
+            }
+            ensure!(payload == expected);
+            server.write_all(&[0x82, 4, 0, 0, b'o', b'k']).await?;
+            Ok::<_, anyhow::Error>(())
+        });
+        let mut stream = connect(client, &proxy, &target, 1).await?;
+        let mut reply = [0; 2];
+        stream.read_exact(&mut reply).await?;
+        ensure!(&reply == b"ok");
+        server_task.await??;
+        Ok(())
     }
 }

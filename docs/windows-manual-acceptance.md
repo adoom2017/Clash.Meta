@@ -149,8 +149,9 @@ rules:
   - MATCH,RealityTest
 ```
 
-不要直接搬入 `client-fingerprint: chrome`；当前实现不支持浏览器指纹模拟。
-此片段的占位值不能通过校验，必须替换。保持证书验证开启。
+可以使用 `client-fingerprint: chrome`（缺省值）或 `firefox`；两者已经与
+官方浏览器 ClientHello 采集结果对比。此片段的占位值不能通过校验，必须替换。
+保持证书验证开启。
 重新执行 `-t`，通过后启动，重复第 4 节的 HTTPS、fake-IP 和下载测试。
 从你信任的出口 IP 查询服务或服务端日志确认出口是节点服务器；下载期间
 `/connections` 中链路应显示 RealityTest。仅看到“连接成功”不算 Vision 数据传输通过。

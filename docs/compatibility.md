@@ -12,14 +12,14 @@ fixtures use synthetic configuration only. No Go compiler is needed by Rust test
 | Entrances | HTTP, CONNECT, SOCKS5, mixed, explicitly enabled TUN |
 | Rules | DOMAIN/DOMAIN-SUFFIX/DOMAIN-KEYWORD/DOMAIN-REGEX, IP-CIDR/IP-CIDR6, DST-PORT, NETWORK, GEOIP, GEOSITE, RULE-SET, AND/OR/NOT, MATCH; first match |
 | Groups | select, url-test; duplicate/cycle/reference validation |
-| DNS | UDP/TCP, HTTPS DoH, cache, fake-IP, bootstrap using IP resolvers |
+| DNS | UDP/TCP, TLS DoT, HTTPS DoH, cache, fake-IP, bootstrap using IP resolvers |
 | CLI | -f, -d, -t, -v, -p, --action encrypt/decrypt, --recover-tun |
 | Logs | Levels, file rotation/compression and controller log events |
 | Hosts | Core lifecycle, PlatformHooks, PacketIo, C ABI v1, Android protect and TUN fd |
 
 Unknown fields and unsupported enum values return a path-aware migration error.
 Not included: servers, HY1, XHTTP, subscription providers, GUI, VMess,
-Shadowsocks, Trojan/Hysteria2 runtime, TUIC, process rules and DoT.
+Shadowsocks, Trojan/Hysteria2 runtime, TUIC and process rules.
 Examples from the old Go product are not silently accepted as full compatibility.
 
 | Controller | Operations |

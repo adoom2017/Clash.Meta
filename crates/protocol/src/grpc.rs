@@ -1,14 +1,16 @@
 //! Mihomo gRPC Gun transport over HTTP/2.
 use crate::BoxStream;
-use anyhow::{Result, ensure};
-use bytes::{Buf, Bytes};
+use anyhow::Result;
+use bytes::Bytes;
 use std::{
     collections::HashMap,
+    future::Future,
+    hash::{Hash, Hasher},
     io,
     pin::Pin,
     sync::{
         Arc, Mutex, OnceLock,
-        atomic::{AtomicUsize, Ordering},
+        atomic::{AtomicU64, AtomicUsize, Ordering},
     },
     task::{Context, Poll, ready},
     time::Duration,
@@ -54,57 +56,140 @@ fn gun_frame(payload: &[u8]) -> Bytes {
 
 #[derive(Clone)]
 struct Physical {
+    id: u64,
     sender: h2::client::SendRequest<Bytes>,
     active: Arc<AtomicUsize>,
 }
 static POOL: OnceLock<Mutex<HashMap<String, Vec<Physical>>>> = OnceLock::new();
+static NEXT_PHYSICAL_ID: AtomicU64 = AtomicU64::new(1);
+static CONNECT_LOCKS: OnceLock<Vec<tokio::sync::Mutex<()>>> = OnceLock::new();
 
-fn key(authority: &str, options: &meta_config::GrpcOptions, secure: bool) -> String {
+async fn connect_lock(key: &str) -> tokio::sync::MutexGuard<'static, ()> {
+    let locks =
+        CONNECT_LOCKS.get_or_init(|| (0..64).map(|_| tokio::sync::Mutex::new(())).collect());
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    key.hash(&mut hasher);
+    locks[hasher.finish() as usize % locks.len()].lock().await
+}
+
+fn key(
+    transport_identity: &str,
+    endpoint: &str,
+    authority: &str,
+    options: &meta_config::GrpcOptions,
+    secure: bool,
+) -> String {
     format!(
-        "{secure}|{authority}|{}|{}|{}",
+        "{transport_identity}|{secure}|{endpoint}|{authority}|{}|{}|{}",
         options.grpc_service_name, options.grpc_user_agent, options.ping_interval
     )
 }
 
+fn reuse_least_loaded(load: usize, connections: usize, options: &meta_config::GrpcOptions) -> bool {
+    if load == 0 {
+        return true;
+    }
+    if options.max_connections > 0 {
+        connections >= options.max_connections || load < options.min_streams
+    } else {
+        options.max_streams == 0 || load < options.max_streams
+    }
+}
+
 fn pooled(key: &str, options: &meta_config::GrpcOptions) -> Option<Physical> {
     let pool = POOL.get_or_init(Default::default);
-    let mut map = pool.lock().unwrap();
-    let list = map.get_mut(key)?;
+    let map = pool.lock().unwrap();
+    let list = map.get(key)?;
     let least = list
         .iter()
         .min_by_key(|entry| entry.active.load(Ordering::Relaxed))?;
     let load = least.active.load(Ordering::Relaxed);
-    let default_single =
-        options.max_connections == 0 && options.min_streams == 0 && options.max_streams == 0;
-    let create = if default_single {
-        false
-    } else if options.max_connections > 0 {
-        load >= options.min_streams && list.len() < options.max_connections
+    reuse_least_loaded(load, list.len(), options).then(|| least.clone())
+}
+
+fn remove_physical(key: &str, id: u64) {
+    let mut map = POOL.get_or_init(Default::default).lock().unwrap();
+    let remove_key = if let Some(list) = map.get_mut(key) {
+        list.retain(|physical| physical.id != id);
+        list.is_empty()
     } else {
-        options.max_streams > 0 && load >= options.max_streams
+        false
     };
-    (!create).then(|| least.clone())
+    if remove_key {
+        map.remove(key);
+    }
+}
+
+struct ActiveLease {
+    active: Arc<AtomicUsize>,
+    transferred: bool,
+}
+impl ActiveLease {
+    fn new(active: Arc<AtomicUsize>) -> Self {
+        active.fetch_add(1, Ordering::Relaxed);
+        Self {
+            active,
+            transferred: false,
+        }
+    }
+    fn transfer(mut self) -> Arc<AtomicUsize> {
+        self.transferred = true;
+        self.active.clone()
+    }
+}
+impl Drop for ActiveLease {
+    fn drop(&mut self) {
+        if !self.transferred {
+            self.active.fetch_sub(1, Ordering::Relaxed);
+        }
+    }
 }
 
 pub async fn connect(
     stream: BoxStream,
+    endpoint: &str,
     authority: &str,
     options: &meta_config::GrpcOptions,
-    secure: bool,
+    tls: Option<(crate::tls::TlsConnectConfig, Arc<crate::tls::Clock>)>,
+    transport_identity: &str,
 ) -> Result<BoxStream> {
-    let pool_key = key(authority, options, secure);
-    let (mut sender, active) = if let Some(physical) = pooled(&pool_key, options) {
-        drop(stream);
-        (physical.sender, physical.active)
-    } else {
+    let secure = tls.is_some();
+    let pool_key = key(transport_identity, endpoint, authority, options, secure);
+    let creation_guard = connect_lock(&pool_key).await;
+    let mut incoming = Some(stream);
+    let (mut sender, lease) = loop {
+        if let Some(physical) = pooled(&pool_key, options) {
+            let lease = ActiveLease::new(physical.active.clone());
+            match physical.sender.ready().await {
+                Ok(sender) => {
+                    drop(incoming.take());
+                    break (sender, lease);
+                }
+                Err(_) => {
+                    remove_physical(&pool_key, physical.id);
+                    drop(lease);
+                    continue;
+                }
+            }
+        }
+        let mut stream = incoming
+            .take()
+            .expect("gRPC transport stream consumed once");
+        if let Some((config, clock)) = tls.as_ref() {
+            stream = crate::tls::SecureConnector::new(clock.clone())
+                .connect(stream, config)
+                .await?;
+        }
         let (sender, mut connection) = h2::client::handshake(stream).await?;
         let active = Arc::new(AtomicUsize::new(0));
+        let id = NEXT_PHYSICAL_ID.fetch_add(1, Ordering::Relaxed);
         POOL.get_or_init(Default::default)
             .lock()
             .unwrap()
-            .entry(pool_key)
+            .entry(pool_key.clone())
             .or_default()
             .push(Physical {
+                id,
                 sender: sender.clone(),
                 active: active.clone(),
             });
@@ -122,15 +207,17 @@ pub async fn connect(
                 }
             });
         }
+        let cleanup_key = pool_key.clone();
         tokio::spawn(async move {
             if let Err(error) = connection.await {
                 tracing::debug!(%error, "gRPC HTTP/2 connection closed");
             }
+            remove_physical(&cleanup_key, id);
         });
-        (sender, active)
+        let lease = ActiveLease::new(active);
+        break (sender.ready().await?, lease);
     };
-    active.fetch_add(1, Ordering::Relaxed);
-    sender = sender.ready().await?;
+    drop(creation_guard);
     let path = if options.grpc_service_name.starts_with('/') {
         options.grpc_service_name.clone()
     } else {
@@ -157,26 +244,22 @@ pub async fn connect(
         .header("te", "trailers")
         .body(())?;
     let (response, send) = sender.send_request(request, false)?;
-    let response = response.await?;
-    ensure!(
-        response.status().is_success(),
-        "gRPC transport rejected: {}",
-        response.status()
-    );
     Ok(Box::new(GrpcStream {
         send,
-        recv: response.into_body(),
+        response: Some(response),
+        recv: None,
         incoming: vec![],
         payload: vec![],
         payload_at: 0,
         closed: false,
-        active,
+        active: lease.transfer(),
     }))
 }
 
 pub struct GrpcStream {
     send: h2::SendStream<Bytes>,
-    recv: h2::RecvStream,
+    response: Option<h2::client::ResponseFuture>,
+    recv: Option<h2::RecvStream>,
     incoming: Vec<u8>,
     payload: Vec<u8>,
     payload_at: usize,
@@ -241,13 +324,38 @@ impl AsyncRead for GrpcStream {
             if self.closed {
                 return Poll::Ready(Ok(()));
             }
-            match ready!(Pin::new(&mut self.recv).poll_data(cx)) {
-                Some(Ok(mut data)) => {
-                    let n = data.remaining();
-                    self.incoming.extend_from_slice(data.chunk());
-                    data.advance(n);
-                    let _ = self.recv.flow_control().release_capacity(n);
+            if self.recv.is_none() {
+                let response = ready!(
+                    Pin::new(
+                        self.response
+                            .as_mut()
+                            .expect("gRPC response future consumed once")
+                    )
+                    .poll(cx)
+                )
+                .map_err(io::Error::other)?;
+                if !response.status().is_success() {
+                    return Poll::Ready(Err(io::Error::other(format!(
+                        "gRPC transport rejected: {}",
+                        response.status()
+                    ))));
                 }
+                self.recv = Some(response.into_body());
+                self.response = None;
+            }
+            let next = {
+                let recv = self.recv.as_mut().expect("gRPC response body initialized");
+                match ready!(Pin::new(&mut *recv).poll_data(cx)) {
+                    Some(Ok(data)) => {
+                        let _ = recv.flow_control().release_capacity(data.len());
+                        Some(Ok(data))
+                    }
+                    Some(Err(error)) => Some(Err(error)),
+                    None => None,
+                }
+            };
+            match next {
+                Some(Ok(data)) => self.incoming.extend_from_slice(&data),
                 Some(Err(error)) => return Poll::Ready(Err(io::Error::other(error))),
                 None => self.closed = true,
             }
@@ -258,15 +366,24 @@ impl AsyncRead for GrpcStream {
 impl AsyncWrite for GrpcStream {
     fn poll_write(
         mut self: Pin<&mut Self>,
-        _: &mut Context<'_>,
+        cx: &mut Context<'_>,
         bytes: &[u8],
     ) -> Poll<io::Result<usize>> {
         if bytes.is_empty() {
             return Poll::Ready(Ok(0));
         }
         let n = bytes.len().min(16 * 1024);
+        let frame = gun_frame(&bytes[..n]);
+        self.send.reserve_capacity(frame.len());
+        while self.send.capacity() < frame.len() {
+            match ready!(self.send.poll_capacity(cx)) {
+                Some(Ok(_)) => {}
+                Some(Err(error)) => return Poll::Ready(Err(io::Error::other(error))),
+                None => return Poll::Ready(Err(io::ErrorKind::BrokenPipe.into())),
+            }
+        }
         self.send
-            .send_data(gun_frame(&bytes[..n]), false)
+            .send_data(frame, false)
             .map_err(io::Error::other)?;
         Poll::Ready(Ok(n))
     }
@@ -299,6 +416,7 @@ mod tests {
             let mut connection = h2::server::handshake(server).await.unwrap();
             let (request, mut respond) = connection.accept().await.unwrap().unwrap();
             assert_eq!(request.uri().path(), "/custom/Tun");
+            assert_eq!(request.uri().authority().unwrap(), "front.example");
             assert_eq!(
                 request.headers()[http::header::CONTENT_TYPE],
                 "application/grpc"
@@ -306,8 +424,12 @@ mod tests {
             assert_eq!(request.headers()[http::header::USER_AGENT], "test-agent");
             let handler = tokio::spawn(async move {
                 let mut body = request.into_body();
+                let first = body.data().await.unwrap().unwrap();
+                let first_size = first.len();
                 let response = http::Response::builder().status(200).body(()).unwrap();
                 let mut send = respond.send_response(response, false).unwrap();
+                send.send_data(first, false).unwrap();
+                body.flow_control().release_capacity(first_size).unwrap();
                 while let Some(chunk) = body.data().await {
                     let chunk = chunk.unwrap();
                     let size = chunk.len();
@@ -331,9 +453,20 @@ mod tests {
             grpc_user_agent: "test-agent".into(),
             ..Default::default()
         };
-        let mut stream = connect(Box::new(client), "unit.example:443", &options, true)
-            .await
-            .unwrap();
+        let mut stream = tokio::time::timeout(
+            Duration::from_secs(1),
+            connect(
+                Box::new(client),
+                "unit.example:443",
+                "front.example",
+                &options,
+                None,
+                "unit-transport",
+            ),
+        )
+        .await
+        .expect("gRPC connect must not wait for response headers")
+        .unwrap();
         stream.write_all(b"hello grpc").await.unwrap();
         stream.flush().await.unwrap();
         let mut echoed = [0u8; 10];
@@ -341,5 +474,98 @@ mod tests {
         assert_eq!(&echoed, b"hello grpc");
         stream.shutdown().await.unwrap();
         server_task.await.unwrap();
+    }
+
+    #[test]
+    fn pool_reuses_idle_and_matches_mihomo_thresholds() {
+        let mut options = meta_config::GrpcOptions {
+            max_connections: 2,
+            min_streams: 2,
+            ..Default::default()
+        };
+        assert!(reuse_least_loaded(0, 1, &options));
+        assert!(reuse_least_loaded(1, 1, &options));
+        assert!(!reuse_least_loaded(2, 1, &options));
+        assert!(reuse_least_loaded(2, 2, &options));
+        options.max_connections = 0;
+        options.min_streams = 0;
+        options.max_streams = 3;
+        assert!(reuse_least_loaded(2, 1, &options));
+        assert!(!reuse_least_loaded(3, 1, &options));
+    }
+
+    #[tokio::test]
+    async fn physical_connection_creation_is_serialized_per_pool() {
+        let key = format!("connect-lock-{}", rand::random::<u64>());
+        let first = connect_lock(&key).await;
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let (acquired_tx, mut acquired_rx) = tokio::sync::oneshot::channel();
+        let task_key = key.clone();
+        let task = tokio::spawn(async move {
+            started_tx.send(()).unwrap();
+            let _guard = connect_lock(&task_key).await;
+            acquired_tx.send(()).unwrap();
+        });
+        started_rx.await.unwrap();
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), &mut acquired_rx)
+                .await
+                .is_err(),
+            "a second physical connection entered the same pool concurrently"
+        );
+        drop(first);
+        tokio::time::timeout(Duration::from_secs(1), acquired_rx)
+            .await
+            .unwrap()
+            .unwrap();
+        task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn large_upload_obeys_h2_flow_control() {
+        let (client, server) = tokio::io::duplex(512 * 1024);
+        let server_task = tokio::spawn(async move {
+            let mut connection = h2::server::handshake(server).await.unwrap();
+            let (request, mut respond) = connection.accept().await.unwrap().unwrap();
+            let handler = tokio::spawn(async move {
+                let mut body = request.into_body();
+                let response = http::Response::builder().status(200).body(()).unwrap();
+                let mut send = respond.send_response(response, false).unwrap();
+                let mut received = 0;
+                while let Some(chunk) = body.data().await {
+                    let chunk = chunk.unwrap();
+                    let size = chunk.len();
+                    received += size;
+                    body.flow_control().release_capacity(size).unwrap();
+                }
+                send.send_data(Bytes::new(), true).unwrap();
+                received
+            });
+            tokio::pin!(handler);
+            loop {
+                tokio::select! {
+                    result = &mut handler => { break result.unwrap(); }
+                    incoming = connection.accept() => {
+                        assert!(incoming.is_none(), "unexpected second gRPC stream");
+                    }
+                }
+            }
+        });
+        let options = meta_config::GrpcOptions::default();
+        let mut stream = connect(
+            Box::new(client),
+            "flow.example:443",
+            "flow.example",
+            &options,
+            None,
+            "flow-control-test",
+        )
+        .await
+        .unwrap();
+        let payload: Vec<_> = (0..256 * 1024).map(|index| (index % 251) as u8).collect();
+        stream.write_all(&payload).await.unwrap();
+        stream.shutdown().await.unwrap();
+        let framed_size = server_task.await.unwrap();
+        assert!(framed_size > payload.len());
     }
 }

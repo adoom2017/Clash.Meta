@@ -25,6 +25,10 @@ implementation uses BoringSSL profiles for cipher/group/signature/key-share,
 GREASE, ALPN, ECH GREASE, ALPS and extension ordering. The former `rustls` value
 is rejected with a configuration error.
 
+Ordinary TLS connections cache at most 256 server/profile/ALPN/verification-bound
+BoringSSL sessions and offer one cached session on the next matching connection.
+REALITY contexts never cache or resume sessions.
+
 Each XUDP session currently owns a separate VLESS connection and one target.
 Frames include the target; responses may include an explicit source address.
 Cross-connection global-ID reuse and pooling multiple flows are not implemented.

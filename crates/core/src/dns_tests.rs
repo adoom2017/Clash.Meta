@@ -15,6 +15,28 @@ fn request(name: &str, id: u16) -> Message {
 }
 
 #[tokio::test]
+async fn dot_uses_dns_tcp_framing_inside_tls_stream() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let query = request("dot.test.", 77);
+    let mut response = query.clone();
+    response.set_message_type(hickory_proto::op::MessageType::Response);
+    let expected = query.to_vec().unwrap();
+    let reply = response.to_vec().unwrap();
+    let (client, mut server) = tokio::io::duplex(4096);
+    let task = tokio::spawn(async move {
+        let length = server.read_u16().await.unwrap() as usize;
+        let mut received = vec![0; length];
+        server.read_exact(&mut received).await.unwrap();
+        assert_eq!(received, expected);
+        server.write_u16(reply.len() as u16).await.unwrap();
+        server.write_all(&reply).await.unwrap();
+    });
+    let received = Resolver::exchange_stream(client, &query).await.unwrap();
+    assert_eq!(received.id(), 77);
+    task.await.unwrap();
+}
+
+#[tokio::test]
 async fn policy_proxy_resolver_hosts_and_fake_persistence() {
     tokio::time::timeout(Duration::from_secs(5), async {
         let udp = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();

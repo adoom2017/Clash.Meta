@@ -137,7 +137,7 @@ pub struct Sniffer {
     pub skip_domain: Vec<String>,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(default, deny_unknown_fields, rename_all = "kebab-case")]
 pub struct WsOptions {
     pub path: String,
@@ -160,7 +160,7 @@ impl Default for WsOptions {
     }
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(default, deny_unknown_fields, rename_all = "kebab-case")]
 pub struct GrpcOptions {
     pub grpc_service_name: String,

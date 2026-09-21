@@ -482,12 +482,33 @@ impl Config {
                         "proxies[{index}].ws-opts fast-open requires v2ray-http-upgrade"
                     );
                     ensure!(
+                        p.network == "ws" || p.ws_opts == WsOptions::default(),
+                        "proxies[{index}].ws-opts requires network: ws"
+                    );
+                    ensure!(
                         p.grpc_opts.max_connections <= 1024,
                         "proxies[{index}].grpc-opts.max-connections is too large"
                     );
                     ensure!(
+                        p.grpc_opts.min_streams <= 65535,
+                        "proxies[{index}].grpc-opts.min-streams is too large"
+                    );
+                    ensure!(
                         p.grpc_opts.max_streams <= 65535,
                         "proxies[{index}].grpc-opts.max-streams is too large"
+                    );
+                    ensure!(
+                        p.grpc_opts.max_streams == 0
+                            || (p.grpc_opts.max_connections == 0 && p.grpc_opts.min_streams == 0),
+                        "proxies[{index}].grpc-opts.max-streams conflicts with max-connections/min-streams"
+                    );
+                    ensure!(
+                        p.grpc_opts.min_streams == 0 || p.grpc_opts.max_connections > 0,
+                        "proxies[{index}].grpc-opts.min-streams requires max-connections"
+                    );
+                    ensure!(
+                        p.network == "grpc" || p.grpc_opts == GrpcOptions::default(),
+                        "proxies[{index}].grpc-opts requires network: grpc"
                     );
                     ensure!(
                         p.flow.is_empty() || p.tls || p.reality_opts.is_some(),
@@ -645,6 +666,10 @@ impl Config {
         }
         for value in self.dns.nameserver_policy.values() {
             ensure!(!value.values().is_empty(), "empty DNS policy upstreams");
+            ensure!(
+                value.values().iter().all(|server| dns_upstream(server)),
+                "unsupported DNS policy upstream"
+            );
         }
         ensure!(
             ["fake-ip", "redir-host"].contains(&self.dns.enhanced_mode.as_str()),
@@ -653,6 +678,15 @@ impl Config {
         ensure!(
             !self.dns.nameserver.is_empty(),
             "dns.nameserver cannot be empty"
+        );
+        ensure!(
+            self.dns
+                .nameserver
+                .iter()
+                .chain(&self.dns.default_nameserver)
+                .chain(&self.dns.proxy_server_nameserver)
+                .all(|server| dns_upstream(server)),
+            "unsupported DNS upstream scheme"
         );
         ensure!(
             (1280..=9000).contains(&self.tun.mtu),
@@ -709,6 +743,14 @@ impl Config {
         }
         Ok(())
     }
+}
+
+fn dns_upstream(value: &str) -> bool {
+    !value.is_empty()
+        && (!value.contains("://")
+            || ["udp://", "tcp://", "tls://", "https://"]
+                .iter()
+                .any(|prefix| value.starts_with(prefix)))
 }
 
 pub fn duration_seconds(value: &str) -> Result<u64> {
@@ -776,6 +818,8 @@ mod tests {
         assert_eq!(cfg.log.max_size, 10);
         let cfg = Config::parse(b"log-level: warning\nlog:\n  log-level: debug\n").unwrap();
         assert_eq!(cfg.log.log_level, "warning");
+        assert!(Config::parse(b"dns:\n  nameserver: [tls://1.1.1.1]\n").is_ok());
+        assert!(Config::parse(b"dns:\n  nameserver: [quic://1.1.1.1]\n").is_err());
     }
     #[test]
     fn reject_unknown_and_cycles() {
@@ -796,6 +840,31 @@ mod tests {
         assert!(Config::parse(format!("{base}  flow: xtls-rprx-vision\n").as_bytes()).is_err());
         assert!(
             Config::parse(format!("{base}  packet-encoding: packetaddr\n").as_bytes()).is_err()
+        );
+        assert!(Config::parse(format!("{base}  ws-opts: {{path: /ws}}\n").as_bytes()).is_err());
+        assert!(
+            Config::parse(
+                format!(
+                    "{base}  network: grpc\n  grpc-opts: {{max-connections: 2, min-streams: 1, max-streams: 4}}\n"
+                )
+                .as_bytes()
+            )
+            .is_err()
+        );
+        assert!(
+            Config::parse(
+                format!("{base}  network: grpc\n  grpc-opts: {{min-streams: 1}}\n").as_bytes()
+            )
+            .is_err()
+        );
+        assert!(
+            Config::parse(
+                format!(
+                    "{base}  network: grpc\n  grpc-opts: {{max-connections: 2, min-streams: 1}}\n"
+                )
+                .as_bytes()
+            )
+            .is_ok()
         );
         let mapped = Config::parse(
             b"proxies:\n- name: test\n  type: vless\n  server: localhost\n  port: 443\n  uuid: example\n",

@@ -420,7 +420,14 @@ impl Resolver {
                 .set_recursion_desired(true)
                 .add_query(Query::query(absolute_name(host)?, kind));
             for server in &self.config.default_nameserver {
-                let addr = parse_server(server.trim_start_matches("udp://"), 53)?;
+                let (raw, default_port) = if let Some(raw) = server.strip_prefix("tls://") {
+                    (raw, 853)
+                } else if let Some(raw) = server.strip_prefix("tcp://") {
+                    (raw, 53)
+                } else {
+                    (server.trim_start_matches("udp://"), 53)
+                };
+                let addr = parse_server(raw, default_port)?;
                 let Ok(ip) = addr.host.parse::<IpAddr>() else {
                     continue;
                 };
@@ -499,6 +506,24 @@ impl Resolver {
             validate_response(request, &response)?;
             return Ok(response);
         }
+        if let Some(raw) = server.strip_prefix("tls://") {
+            let target = parse_server(raw, 853)?;
+            let addr = self.bootstrap(&target.host, target.port).await?;
+            let socket = meta_platform::tcp_connect(addr, &*self.hooks).await?;
+            let stream = meta_protocol::tls::SecureConnector::new(self.clock.clone())
+                .connect(
+                    Box::new(socket),
+                    &meta_protocol::tls::TlsConnectConfig {
+                        server_name: target.host,
+                        alpn: Vec::new(),
+                        verify_cert: true,
+                        fingerprint: meta_protocol::tls::TlsFingerprint::Native,
+                        reality: None,
+                    },
+                )
+                .await?;
+            return Self::exchange_stream(stream, request).await;
+        }
         let tcp = server.starts_with("tcp://");
         let raw = server
             .trim_start_matches("udp://")
@@ -533,7 +558,13 @@ impl Resolver {
         Ok(response)
     }
     async fn raw_tcp(&self, addr: SocketAddr, request: &Message) -> Result<Message> {
-        let mut socket = meta_platform::tcp_connect(addr, &*self.hooks).await?;
+        let socket = meta_platform::tcp_connect(addr, &*self.hooks).await?;
+        Self::exchange_stream(socket, request).await
+    }
+    async fn exchange_stream<S>(mut socket: S, request: &Message) -> Result<Message>
+    where
+        S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+    {
         let bytes = request.to_vec()?;
         socket.write_u16(bytes.len() as u16).await?;
         socket.write_all(&bytes).await?;
