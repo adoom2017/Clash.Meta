@@ -46,7 +46,7 @@ async fn handle(
     if socks {
         socks_connection(core, stream, peer).await
     } else {
-        http_connection(core, &mut stream).await
+        http_connection(core, &mut stream, peer).await
     }
 }
 async fn socks_target<R: tokio::io::AsyncRead + Unpin>(
@@ -140,12 +140,14 @@ async fn socks_connection(core: Arc<Core>, mut stream: TcpStream, peer: SocketAd
     if cmd == 1 && core.should_sniff(&core.restore_target(&target)) {
         stream.write_all(&[5, 0, 0, 1, 0, 0, 0, 0, 0, 0]).await?;
         let (route, destination, prefix) = core.sniff_target(&mut stream, &target).await?;
-        let (mut outbound, name) = core.dial_sniffed(&route, &destination).await?;
+        let (mut outbound, name) = core
+            .dial_sniffed(&route, &destination, &peer.to_string())
+            .await?;
         outbound.write_all(&prefix).await?;
         return core.relay(Box::new(stream), route, outbound, name).await;
     }
     match cmd {
-        1 => match core.dial(&target, None).await {
+        1 => match core.dial_logged(&target, None, &peer.to_string()).await {
             Ok((outbound, name)) => {
                 stream.write_all(&[5, 0, 0, 1, 0, 0, 0, 0, 0, 0]).await?;
                 core.relay(Box::new(stream), target, outbound, name).await
@@ -229,7 +231,7 @@ async fn socks_udp(
     }
     Ok(())
 }
-async fn http_connection(core: Arc<Core>, stream: &mut TcpStream) -> Result<()> {
+async fn http_connection(core: Arc<Core>, stream: &mut TcpStream, peer: SocketAddr) -> Result<()> {
     let mut bytes = vec![];
     let handshake = async {
         let mut b = [0];
@@ -278,11 +280,13 @@ async fn http_connection(core: Arc<Core>, stream: &mut TcpStream) -> Result<()> 
             .write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n")
             .await?;
         let (route, destination, prefix) = core.sniff_target(stream, &target).await?;
-        let (mut outbound, node) = core.dial_sniffed(&route, &destination).await?;
+        let (mut outbound, node) = core
+            .dial_sniffed(&route, &destination, &peer.to_string())
+            .await?;
         outbound.write_all(&prefix).await?;
         return core.relay_io(stream, route, outbound, node).await;
     }
-    let (mut outbound, node) = match core.dial(&target, None).await {
+    let (mut outbound, node) = match core.dial_logged(&target, None, &peer.to_string()).await {
         Ok(v) => v,
         Err(e) => {
             stream

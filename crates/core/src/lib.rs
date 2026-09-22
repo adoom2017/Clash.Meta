@@ -51,6 +51,81 @@ struct Policy {
     selection: HashMap<String, String>,
     delay: HashMap<String, u64>,
 }
+#[derive(Clone, Debug)]
+pub(crate) struct RouteDecision {
+    pub(crate) node: String,
+    pub(crate) group: String,
+    pub(crate) rule: String,
+}
+
+fn without_last_rule_field<'a>(raw: &'a str, expected: &str) -> &'a str {
+    let mut depth = 0usize;
+    for (index, character) in raw.char_indices().rev() {
+        match character {
+            ')' => depth += 1,
+            '(' => depth = depth.saturating_sub(1),
+            ',' if depth == 0 && raw[index + 1..].trim().eq_ignore_ascii_case(expected) => {
+                return raw[..index].trim_end();
+            }
+            _ => {}
+        }
+    }
+    raw
+}
+
+fn describe_rule(raw: &str, target: &str) -> String {
+    let raw = without_last_rule_field(raw, "no-resolve");
+    let raw = without_last_rule_field(raw, target);
+    let Some((kind, value)) = raw.split_once(',') else {
+        return if raw.eq_ignore_ascii_case("MATCH") {
+            "Match".into()
+        } else {
+            raw.into()
+        };
+    };
+    let kind = kind.trim();
+    let value = value.trim();
+    let name = match kind.to_ascii_uppercase().as_str() {
+        "DOMAIN" => "Domain",
+        "DOMAIN-SUFFIX" => "DomainSuffix",
+        "DOMAIN-KEYWORD" => "DomainKeyword",
+        "DOMAIN-REGEX" => "DomainRegex",
+        "IP-CIDR" => "IPCIDR",
+        "IP-CIDR6" => "IPCIDR6",
+        "GEOIP" => "GeoIP",
+        "GEOSITE" => "GeoSite",
+        "RULE-SET" => "RuleSet",
+        "DST-PORT" => "DstPort",
+        "NETWORK" => "Network",
+        "AND" => "And",
+        "OR" => "Or",
+        "NOT" => "Not",
+        _ => kind,
+    };
+    format!("{name}({value})")
+}
+
+#[cfg(test)]
+mod connection_log_tests {
+    use super::describe_rule;
+
+    #[test]
+    fn clash_style_rule_descriptions_preserve_the_match_condition() {
+        assert_eq!(describe_rule("MATCH,DIRECT", "DIRECT"), "Match");
+        assert_eq!(
+            describe_rule("DOMAIN-SUFFIX,chatgpt.com,OpenAI", "OpenAI"),
+            "DomainSuffix(chatgpt.com)"
+        );
+        assert_eq!(
+            describe_rule("GEOIP,CN,DIRECT,no-resolve", "DIRECT"),
+            "GeoIP(CN)"
+        );
+        assert_eq!(
+            describe_rule("DOMAIN-SUFFIX, example.com, Proxy Group", "Proxy Group"),
+            "DomainSuffix(example.com)"
+        );
+    }
+}
 #[derive(Clone, Serialize)]
 pub struct Connection {
     pub id: String,
@@ -321,21 +396,33 @@ impl Core {
         *resources = next;
         Ok(())
     }
-    async fn route(&self, target: &Target, network: &str) -> Result<String> {
-        let (mode, rules) = {
+    pub(crate) async fn route_decision(
+        &self,
+        target: &Target,
+        network: &str,
+    ) -> Result<RouteDecision> {
+        let (mode, rules, raw_rules) = {
             let p = self.policy.read().unwrap();
-            (p.mode.clone(), p.rules.clone())
+            (p.mode.clone(), p.rules.clone(), p.raw_rules.clone())
         };
         if mode == Mode::Direct {
-            return Ok("DIRECT".into());
+            return Ok(RouteDecision {
+                node: "DIRECT".into(),
+                group: "DIRECT".into(),
+                rule: "Mode(Direct)".into(),
+            });
         }
         if mode == Mode::Global {
-            return self.leaf("GLOBAL");
+            return Ok(RouteDecision {
+                node: self.leaf("GLOBAL")?,
+                group: "GLOBAL".into(),
+                rule: "Mode(Global)".into(),
+            });
         }
         let mut ip = target.ip();
         let mut resolved = ip.is_some();
         let host = target.host.trim_end_matches('.').to_ascii_lowercase();
-        for rule in rules {
+        for (index, rule) in rules.into_iter().enumerate() {
             let matched = rule.matcher.evaluate(
                 &host,
                 ip,
@@ -355,10 +442,25 @@ impl Core {
             if matched == Some(true)
                 || (matched.is_none() && rule.matches(&host, ip, target.port, network))
             {
-                return self.leaf(&rule.target);
+                return Ok(RouteDecision {
+                    node: self.leaf(&rule.target)?,
+                    group: rule.target.clone(),
+                    rule: raw_rules
+                        .get(index)
+                        .map(|raw| describe_rule(raw, &rule.target))
+                        .unwrap_or_else(|| "Match".into()),
+                });
             }
         }
-        Ok("DIRECT".into())
+        Ok(RouteDecision {
+            node: "DIRECT".into(),
+            group: "DIRECT".into(),
+            rule: "Fallback".into(),
+        })
+    }
+    #[cfg(test)]
+    async fn route(&self, target: &Target, network: &str) -> Result<String> {
+        Ok(self.route_decision(target, network).await?.node)
     }
     fn leaf(&self, name: &str) -> Result<String> {
         let policy = self.policy.read().unwrap();
@@ -438,7 +540,16 @@ impl Core {
     }
     async fn raw_tcp(&self, target: &Target) -> Result<tokio::net::TcpStream> {
         let addresses = self.resolver.lookup(&target.host, target.port).await?;
-        self.connect_addresses(addresses, false, "").await
+        let stream = self.connect_addresses(addresses, false, "").await?;
+        if let (Ok(local), Ok(remote)) = (stream.local_addr(), stream.peer_addr()) {
+            tracing::info!(
+                "[OUTBOUND] {} --> {} using DIRECT for {}",
+                local,
+                remote,
+                target
+            );
+        }
+        Ok(stream)
     }
     async fn connect_addresses(
         &self,
@@ -521,7 +632,19 @@ impl Core {
                 Ok(socket) => socket,
                 Err(error) => return Err(error),
             };
+            let local = socket.local_addr().ok();
             let peer = socket.peer_addr().ok();
+            if let (Some(local), Some(remote)) = (local, peer) {
+                tracing::info!(
+                    "[OUTBOUND] {} --> {} connecting {}({}:{}) for {}",
+                    local,
+                    remote,
+                    proxy.name,
+                    proxy.server,
+                    proxy.port,
+                    target
+                );
+            }
             match meta_protocol::vless::connect_with_options(
                 socket,
                 proxy,
@@ -533,7 +656,18 @@ impl Core {
             .await
             {
                 Ok(stream) => return Ok(stream),
-                Err(error) => last = error,
+                Err(error) => {
+                    if let Some(remote) = peer {
+                        tracing::warn!(
+                            "[OUTBOUND] {} handshake failed using {} for {}: {:#}",
+                            remote,
+                            proxy.name,
+                            target,
+                            error
+                        );
+                    }
+                    last = error;
+                }
             }
             if let Some(peer) = peer {
                 addresses.retain(|address| *address != peer);
@@ -548,22 +682,64 @@ impl Core {
         target: &Target,
         selected: Option<&str>,
     ) -> Result<(BoxStream, String)> {
-        tokio::select! {
+        let (stream, decision) = tokio::select! {
             biased;
             _ = self.stop.cancelled() => bail!("core stopped"),
-            result = tokio::time::timeout(Duration::from_secs(20), self.dial_inner(target, selected)) => result?,
-        }
+            result = tokio::time::timeout(Duration::from_secs(20), self.dial_inner(target, selected, "tcp")) => result??,
+        };
+        Ok((stream, decision.node))
+    }
+    pub(crate) async fn dial_logged(
+        &self,
+        target: &Target,
+        selected: Option<&str>,
+        source: &str,
+    ) -> Result<(BoxStream, String)> {
+        let display_target = self.restore_target(target);
+        let (stream, decision) = tokio::select! {
+            biased;
+            _ = self.stop.cancelled() => bail!("core stopped"),
+            result = tokio::time::timeout(Duration::from_secs(20), self.dial_inner(&display_target, selected, "tcp")) => result??,
+        };
+        Self::log_connection("TCP", source, &display_target, &decision);
+        Ok((stream, decision.node))
+    }
+    pub(crate) fn log_connection(
+        network: &str,
+        source: &str,
+        target: &Target,
+        decision: &RouteDecision,
+    ) {
+        let using = if decision.group == decision.node {
+            decision.node.clone()
+        } else {
+            format!("{}[{}]", decision.group, decision.node)
+        };
+        tracing::info!(
+            "[{}] {} --> {} match {} using {}",
+            network,
+            source,
+            target,
+            decision.rule,
+            using
+        );
     }
     async fn dial_inner(
         &self,
         target: &Target,
         selected: Option<&str>,
-    ) -> Result<(BoxStream, String)> {
+        network: &str,
+    ) -> Result<(BoxStream, RouteDecision)> {
         let target = self.restore_target(target);
-        let name = match selected {
-            Some(n) => self.leaf(n)?,
-            None => self.route(&target, "tcp").await?,
+        let decision = match selected {
+            Some(n) => RouteDecision {
+                node: self.leaf(n)?,
+                group: n.into(),
+                rule: "Selected".into(),
+            },
+            None => self.route_decision(&target, network).await?,
         };
+        let name = &decision.node;
         let stream = tokio::time::timeout(Duration::from_secs(20), async {
             if name == "DIRECT" {
                 return Ok::<BoxStream, anyhow::Error>(Box::new(self.raw_tcp(&target).await?));
@@ -575,7 +751,7 @@ impl Core {
                 .config
                 .proxies
                 .iter()
-                .find(|p| p.name == name)
+                .find(|p| p.name == name.as_str())
                 .context("proxy not found")?;
             match p.kind {
                 ProxyKind::Vless => self.vless_stream(p, &target, 1).await,
@@ -585,10 +761,10 @@ impl Core {
             }
         })
         .await??;
-        Ok((stream, name))
+        Ok((stream, decision))
     }
     pub async fn datagram(self: &Arc<Self>, target: &Target) -> Result<Arc<dyn Datagram>> {
-        self.datagram_with_global_id(target, None).await
+        self.datagram_with_global_id(target, None, None).await
     }
     pub(crate) async fn datagram_for_source(
         self: &Arc<Self>,
@@ -601,22 +777,28 @@ impl Core {
         let digest = digest.finalize();
         let mut global_id = [0; 8];
         global_id.copy_from_slice(&digest[..8]);
-        self.datagram_with_global_id(target, Some(global_id)).await
+        self.datagram_with_global_id(target, Some(global_id), Some(source))
+            .await
     }
     async fn datagram_with_global_id(
         self: &Arc<Self>,
         target: &Target,
         global_id: Option<[u8; 8]>,
+        source: Option<&str>,
     ) -> Result<Arc<dyn Datagram>> {
         let target = self.restore_target(target);
         tokio::select! {
             biased;
             _=self.stop.cancelled()=>bail!("core stopped"),
             result=tokio::time::timeout(Duration::from_secs(20),async {
-                let name=self.route(&target,"udp").await?;
-                let inner=self.datagram_inner(&target,&name,global_id).await?;
+                let decision=self.route_decision(&target,"udp").await?;
+                let inner=self.datagram_inner(&target,&decision.node,global_id).await?;
+                if let Some(source)=source {
+                    let source=source.split_once(':').map(|(_,value)|value).unwrap_or(source);
+                    Self::log_connection("UDP",source,&target,&decision);
+                }
                 Ok::<Arc<dyn Datagram>,anyhow::Error>(Arc::new(traffic::PacketSession {
-                    inner,tracker:traffic::Tracker::new(self.clone(),target,name,"udp")?
+                    inner,tracker:traffic::Tracker::new(self.clone(),target,decision.node,"udp")?
                 }))
             })=>result?,
         }
@@ -646,6 +828,14 @@ impl Core {
             .parse()?;
             let socket = meta_platform::udp_bind_for(bind, Some(remote), &*self.hooks)?;
             socket.connect(remote).await?;
+            if let Ok(local) = socket.local_addr() {
+                tracing::info!(
+                    "[OUTBOUND/UDP] {} --> {} using DIRECT for {}",
+                    local,
+                    remote,
+                    target
+                );
+            }
             return Ok(Arc::new(DirectUdp {
                 socket,
                 target: target.clone(),

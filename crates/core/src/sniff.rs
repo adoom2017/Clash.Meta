@@ -157,9 +157,12 @@ impl crate::Core {
         &self,
         route: &Target,
         destination: &Target,
+        source: &str,
     ) -> anyhow::Result<(meta_protocol::BoxStream, String)> {
-        let selected = self.route(route, "tcp").await?;
-        self.dial(destination, Some(&selected)).await
+        let decision = self.route_decision(route, "tcp").await?;
+        let (stream, _) = self.dial(destination, Some(&decision.node)).await?;
+        Self::log_connection("TCP", source, route, &decision);
+        Ok((stream, decision.node))
     }
 }
 fn domain(pattern: &str, host: &str) -> bool {

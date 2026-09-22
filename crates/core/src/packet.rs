@@ -278,13 +278,14 @@ async fn tcp_session(core: Arc<Core>, flow: Flow, mut stream: ChannelStream) -> 
         return tokio::time::timeout(Duration::from_secs(120), serve).await?;
     }
     let target = Target::new(flow.target.addr.to_string(), flow.target.port)?;
+    let source = flow.source.to_string();
     if core.should_sniff(&core.restore_target(&target)) {
         let (route, destination, prefix) = core.sniff_target(&mut stream, &target).await?;
-        let (mut outbound, name) = core.dial_sniffed(&route, &destination).await?;
+        let (mut outbound, name) = core.dial_sniffed(&route, &destination, &source).await?;
         outbound.write_all(&prefix).await?;
         return core.relay(Box::new(stream), route, outbound, name).await;
     }
-    let (outbound, name) = core.dial(&target, None).await?;
+    let (outbound, name) = core.dial_logged(&target, None, &source).await?;
     core.relay(Box::new(stream), target, outbound, name).await
 }
 async fn udp_session(

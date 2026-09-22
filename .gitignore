@@ -30,6 +30,7 @@ test/config/cache*
 /geosite.dat
 /rule_provider/
 /meta-rust-tun.lock
+/meta-rust-tun-state.json
 /.meta-profile.json
 /examples/config-new.yaml
 .vscode/
