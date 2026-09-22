@@ -270,6 +270,34 @@ async fn scenario() -> Result<()> {
                 );
             }
         }
+        eprintln!("XUDP pooled flows host={host}");
+        let proxy: meta_config::Proxy = serde_json::from_value(serde_json::json!({
+            "name":"xudp-pool-oracle","type":"vless","server":"127.0.0.1",
+            "port":ports[0],"uuid":id
+        }))?;
+        let target = Target::new(host, udp_port)?;
+        let stream = vless::connect(
+            TcpStream::connect(("127.0.0.1", ports[0])).await?,
+            &proxy,
+            &target,
+            3,
+        )
+        .await?;
+        let mux = xudp::Multiplexer::new(stream);
+        let first = mux.session(target.clone(), Some([1; 8]))?;
+        let second = mux.session(target.clone(), Some([2; 8]))?;
+        first.send(&target, b"pooled-first").await?;
+        second.send(&target, b"pooled-second").await?;
+        ensure!(
+            tokio::time::timeout(Duration::from_secs(8), first.recv()).await??
+                == (target.clone(), b"pooled-first".to_vec()),
+            "first pooled XUDP flow failed"
+        );
+        ensure!(
+            tokio::time::timeout(Duration::from_secs(8), second.recv()).await??
+                == (target.clone(), b"pooled-second".to_vec()),
+            "second pooled XUDP flow failed"
+        );
         for (network, port) in [("ws", transport_ports[0]), ("grpc", transport_ports[1])] {
             eprintln!("{network} TCP/XUDP host={host}");
             let mut value = serde_json::json!({

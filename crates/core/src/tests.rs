@@ -449,6 +449,82 @@ async fn core_selects_udp_or_xudp_from_configuration() {
 }
 
 #[tokio::test]
+async fn xudp_pools_flows_and_reuses_source_global_id() {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        let oracle = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let core = Core::new(
+            configuration(oracle.local_addr().unwrap(), true),
+            Arc::new(meta_platform::DefaultHooks),
+        )
+        .unwrap();
+        let task = tokio::spawn(async move {
+            let (mut stream, _) = oracle.accept().await.unwrap();
+            let mut request = [0; 19];
+            stream.read_exact(&mut request).await.unwrap();
+            assert_eq!(&request[17..], &[0, 3]);
+            let mut frames = Vec::new();
+            for _ in 0..2 {
+                let length = stream.read_u16().await.unwrap() as usize;
+                let mut metadata = vec![0; length];
+                stream.read_exact(&mut metadata).await.unwrap();
+                let payload_length = stream.read_u16().await.unwrap() as usize;
+                let mut payload = vec![0; payload_length];
+                stream.read_exact(&mut payload).await.unwrap();
+                assert_eq!(metadata[2], 1);
+                assert_eq!(metadata.len(), 20);
+                frames.push((
+                    u16::from_be_bytes([metadata[0], metadata[1]]),
+                    metadata[12..20].to_vec(),
+                    metadata[5..12].to_vec(),
+                    payload,
+                ));
+            }
+            assert_ne!(frames[0].0, frames[1].0);
+            assert_eq!(frames[0].1, frames[1].1);
+            assert_ne!(frames[0].1, [0; 8]);
+            stream.write_all(&[0, 0]).await.unwrap();
+            for (id, _, address, payload) in frames.into_iter().rev() {
+                stream.write_u16(12).await.unwrap();
+                stream.write_u16(id).await.unwrap();
+                stream.write_all(&[2, 1, 2]).await.unwrap();
+                stream.write_all(&address).await.unwrap();
+                stream.write_u16(payload.len() as u16).await.unwrap();
+                stream.write_all(&payload).await.unwrap();
+            }
+            assert!(
+                tokio::time::timeout(Duration::from_millis(50), oracle.accept())
+                    .await
+                    .is_err(),
+                "XUDP flows opened more than one physical connection"
+            );
+        });
+        let first_target = Target::new("1.1.1.1", 53).unwrap();
+        let second_target = Target::new("2.2.2.2", 443).unwrap();
+        let first = core
+            .datagram_for_source(&first_target, "socks:127.0.0.1:12345")
+            .await
+            .unwrap();
+        let second = core
+            .datagram_for_source(&second_target, "socks:127.0.0.1:12345")
+            .await
+            .unwrap();
+        first.send(&first_target, b"first").await.unwrap();
+        second.send(&second_target, b"second").await.unwrap();
+        assert_eq!(
+            first.recv().await.unwrap(),
+            (first_target, b"first".to_vec())
+        );
+        assert_eq!(
+            second.recv().await.unwrap(),
+            (second_target, b"second".to_vec())
+        );
+        task.await.unwrap();
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
 async fn socks_udp_reconnects_after_outbound_closes() {
     tokio::time::timeout(Duration::from_secs(10), async {
         for xudp in [false, true] {

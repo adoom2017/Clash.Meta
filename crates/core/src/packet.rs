@@ -306,7 +306,9 @@ async fn udp_session(
         return Ok(());
     }
     let target = Target::new(flow.target.addr.to_string(), flow.target.port)?;
-    let session = core.datagram(&target).await?;
+    let session = core
+        .datagram_for_source(&target, &format!("tun:{}", flow.source))
+        .await?;
     let target = core.restore_target(&target);
     // Keep each receive alive while sending: stream-based UDP decoders cannot
     // resume safely if a partially read frame is cancelled for every upload.

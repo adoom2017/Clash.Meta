@@ -17,10 +17,11 @@ use meta_config::{Config, GroupKind, Mode, ProxyKind, rule::Rule};
 use meta_platform::Hooks;
 use meta_protocol::{BoxStream, Datagram, Target};
 use serde::Serialize;
+use sha2::{Digest, Sha256};
 use std::{
     collections::HashMap,
     net::SocketAddr,
-    sync::{Arc, Mutex, RwLock, atomic::AtomicU64},
+    sync::{Arc, Mutex, RwLock, Weak, atomic::AtomicU64},
     time::{Duration, Instant},
 };
 use tokio::{io::AsyncWriteExt, task::JoinSet};
@@ -40,6 +41,8 @@ pub struct Core {
     pub events: tokio::sync::broadcast::Sender<String>,
     resources: RwLock<Arc<resources::Resources>>,
     clock: Arc<meta_protocol::tls::Clock>,
+    xudp_pool: tokio::sync::Mutex<HashMap<String, Weak<meta_protocol::xudp::Multiplexer>>>,
+    xudp_key: [u8; 32],
 }
 struct Policy {
     mode: Mode,
@@ -111,6 +114,9 @@ impl Core {
             delay: HashMap::new(),
         };
         let (events, _) = tokio::sync::broadcast::channel(256);
+        let mut xudp_key = [0; 32];
+        xudp_key[..16].copy_from_slice(uuid::Uuid::new_v4().as_bytes());
+        xudp_key[16..].copy_from_slice(uuid::Uuid::new_v4().as_bytes());
         Ok(Arc::new(Self {
             config,
             resolver,
@@ -125,6 +131,8 @@ impl Core {
             events,
             resources: RwLock::new(Arc::new(resources::Resources::default())),
             clock,
+            xudp_pool: Default::default(),
+            xudp_key,
         }))
     }
     pub async fn start(self: &Arc<Self>) -> Result<Running> {
@@ -580,20 +588,45 @@ impl Core {
         Ok((stream, name))
     }
     pub async fn datagram(self: &Arc<Self>, target: &Target) -> Result<Arc<dyn Datagram>> {
+        self.datagram_with_global_id(target, None).await
+    }
+    pub(crate) async fn datagram_for_source(
+        self: &Arc<Self>,
+        target: &Target,
+        source: &str,
+    ) -> Result<Arc<dyn Datagram>> {
+        let mut digest = Sha256::new();
+        digest.update(self.xudp_key);
+        digest.update(source.as_bytes());
+        let digest = digest.finalize();
+        let mut global_id = [0; 8];
+        global_id.copy_from_slice(&digest[..8]);
+        self.datagram_with_global_id(target, Some(global_id)).await
+    }
+    async fn datagram_with_global_id(
+        self: &Arc<Self>,
+        target: &Target,
+        global_id: Option<[u8; 8]>,
+    ) -> Result<Arc<dyn Datagram>> {
         let target = self.restore_target(target);
         tokio::select! {
             biased;
             _=self.stop.cancelled()=>bail!("core stopped"),
             result=tokio::time::timeout(Duration::from_secs(20),async {
                 let name=self.route(&target,"udp").await?;
-                let inner=self.datagram_inner(&target,&name).await?;
+                let inner=self.datagram_inner(&target,&name,global_id).await?;
                 Ok::<Arc<dyn Datagram>,anyhow::Error>(Arc::new(traffic::PacketSession {
                     inner,tracker:traffic::Tracker::new(self.clone(),target,name,"udp")?
                 }))
             })=>result?,
         }
     }
-    async fn datagram_inner(&self, target: &Target, name: &str) -> Result<Arc<dyn Datagram>> {
+    async fn datagram_inner(
+        &self,
+        target: &Target,
+        name: &str,
+        global_id: Option<[u8; 8]>,
+    ) -> Result<Arc<dyn Datagram>> {
         if name == "REJECT" {
             bail!("UDP rejected");
         }
@@ -630,15 +663,22 @@ impl Core {
                 let xudp = proxy.xudp
                     || proxy.packet_encoding.as_deref() == Some("xudp")
                     || proxy.flow == "xtls-rprx-vision";
-                let stream = self
-                    .vless_stream(proxy, target, if xudp { 3 } else { 2 })
-                    .await?;
                 if xudp {
-                    Ok(Arc::new(meta_protocol::xudp::Session::new(
-                        stream,
-                        target.clone(),
-                    )))
+                    let multiplexer = {
+                        let mut pool = self.xudp_pool.lock().await;
+                        pool.retain(|_, weak| weak.upgrade().is_some_and(|mux| mux.is_alive()));
+                        if let Some(mux) = pool.get(name).and_then(Weak::upgrade) {
+                            mux
+                        } else {
+                            let stream = self.vless_stream(proxy, target, 3).await?;
+                            let mux = meta_protocol::xudp::Multiplexer::new(stream);
+                            pool.insert(name.to_owned(), Arc::downgrade(&mux));
+                            mux
+                        }
+                    };
+                    Ok(Arc::new(multiplexer.session(target.clone(), global_id)?))
                 } else {
+                    let stream = self.vless_stream(proxy, target, 2).await?;
                     Ok(Arc::new(meta_protocol::vless::UdpSession::new(
                         stream,
                         target.clone(),

@@ -9,7 +9,6 @@ use boring::{
 use meta_protocol::{Datagram, Target, vless, xudp};
 use std::{
     process::{Child, Command, Stdio},
-    sync::Arc,
     time::Duration,
 };
 use tokio::{
@@ -197,12 +196,19 @@ async fn scenario() -> Result<()> {
     )
     .await?;
     eprintln!("REALITY XUDP: connected");
-    let session: Arc<dyn Datagram> = Arc::new(xudp::Session::new(stream, target.clone()));
-    session.send(&target, b"reality-xudp").await?;
+    let mux = xudp::Multiplexer::new(stream);
+    let first = mux.session(target.clone(), Some([3; 8]))?;
+    let second = mux.session(target.clone(), Some([4; 8]))?;
+    first.send(&target, b"reality-xudp-first").await?;
+    second.send(&target, b"reality-xudp-second").await?;
     eprintln!("REALITY XUDP: sent");
     ensure!(
-        session.recv().await? == (target, b"reality-xudp".to_vec()),
-        "REALITY XUDP echo failed"
+        first.recv().await? == (target.clone(), b"reality-xudp-first".to_vec()),
+        "first REALITY XUDP flow failed"
+    );
+    ensure!(
+        second.recv().await? == (target, b"reality-xudp-second".to_vec()),
+        "second REALITY XUDP flow failed"
     );
 
     decoy_task.abort();

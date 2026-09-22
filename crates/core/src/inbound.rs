@@ -211,7 +211,7 @@ async fn socks_udp(
                 let restored=core.restore_target(&target);
                 if !sessions.contains_key(&target) {
                     if sessions.len()>=256{continue;}
-                    let Ok(session)=tokio::time::timeout(Duration::from_secs(20),core.datagram(&target)).await? else{continue;};let receiver=session.clone();let local=socket.clone();let response_target=target.clone();let restored_target=restored.clone();
+                    let Ok(session)=tokio::time::timeout(Duration::from_secs(20),core.datagram_for_source(&target,&format!("socks:{source}"))).await? else{continue;};let receiver=session.clone();let local=socket.clone();let response_target=target.clone();let restored_target=restored.clone();
                     let receiver=tasks.spawn(async move {
                         while let Ok(Ok((target,bytes)))=tokio::time::timeout(Duration::from_secs(120),receiver.recv()).await {
                             let target=if target==restored_target{response_target.clone()}else{target};let mut message=vec![0,0,0];message.extend(socks_address(&target));message.extend(bytes);if local.send_to(&message,source).await.is_err(){break;}

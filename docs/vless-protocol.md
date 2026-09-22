@@ -29,9 +29,12 @@ Ordinary TLS connections cache at most 256 server/profile/ALPN/verification-boun
 BoringSSL sessions and offer one cached session on the next matching connection.
 REALITY contexts never cache or resume sessions.
 
-Each XUDP session currently owns a separate VLESS connection and one target.
+XUDP logical sessions share a VLESS command-3 physical connection per selected
+proxy. Each flow has an independent 16-bit mux session ID, bounded receive queue
+and target, while SOCKS/TUN flows derive a stable 8-byte Global ID from their
+inbound source. A broken or partially written physical stream invalidates every
+attached flow so the next inbound packet can establish a clean connection.
 Frames include the target; responses may include an explicit source address.
-Cross-connection global-ID reuse and pooling multiple flows are not implemented.
 These are optimizations beyond the single-session transport implemented here.
 
 ## Wire Details
