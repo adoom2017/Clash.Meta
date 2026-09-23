@@ -384,7 +384,7 @@ if(USE_CUSTOM_LIBCXX)
          FILE ${PROJECT_BINARY_DIR}/bssl_test_only.cmake)
 endif()
 
-if(BUILD_TESTING)
+if(BUILD_TESTING AND NOT BORINGSSL_RUST_BUILD)
   # Add minimal googletest targets. The provided one has many side-effects, and
   # googletest has a very straightforward build.
   add_library(

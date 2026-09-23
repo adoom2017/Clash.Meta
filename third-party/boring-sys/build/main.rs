@@ -236,7 +236,9 @@ fn get_boringssl_cmake_config(config: &Config) -> cmake::Config {
     // The Rust crate links only libcrypto and libssl. BoringSSL's test and
     // benchmark targets add configure-time executable probes which cannot run
     // while cross-compiling for Android.
-    boringssl_cmake.define("BUILD_TESTING", "OFF");
+    boringssl_cmake
+        .define("BUILD_TESTING", "OFF")
+        .define("BORINGSSL_RUST_BUILD", "ON");
 
     if config.env.cmake_toolchain_file.is_some() {
         return boringssl_cmake;
