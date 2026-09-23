@@ -82,6 +82,14 @@ try {
                     break
                 }
             }
+            if ($licenseFiles.Count -eq 0 -and $dependency.repository) {
+                $repositoryName = [System.IO.Path]::GetFileNameWithoutExtension(([Uri]$dependency.repository).AbsolutePath.TrimEnd('/'))
+                $overrideDirectory = Join-Path $workspace "third-party/license-overrides/$repositoryName"
+                if (Test-Path -LiteralPath $overrideDirectory -PathType Container) {
+                    $licenseFiles = @(Get-ChildItem -LiteralPath $overrideDirectory -File)
+                    $noticeSource = "repository-license:$repositoryName"
+                }
+            }
             if ($licenseFiles.Count -eq 0) { throw "Upstream workspace license notices missing for $($dependency.name)." }
         }
         foreach ($licenseFile in ($licenseFiles | Sort-Object FullName -Unique)) {
