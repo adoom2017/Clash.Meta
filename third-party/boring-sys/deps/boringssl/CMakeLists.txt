@@ -384,10 +384,7 @@ if(USE_CUSTOM_LIBCXX)
          FILE ${PROJECT_BINARY_DIR}/bssl_test_only.cmake)
 endif()
 
-# This source tree is vendored exclusively by boring-sys, whose build script
-# requests only the crypto and ssl targets. Do not configure Google Benchmark:
-# its feature probes are not cross-compilation safe.
-if(FALSE)
+if(BUILD_TESTING AND NOT BORINGSSL_RUST_BUILD)
   # Add minimal googletest targets. The provided one has many side-effects, and
   # googletest has a very straightforward build.
   add_library(

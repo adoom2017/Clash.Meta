@@ -260,7 +260,9 @@ fn get_boringssl_cmake_config(config: &Config) -> cmake::Config {
         return boringssl_cmake;
     }
 
-    if should_use_cmake_cross_compilation(config) {
+    // The Android NDK toolchain owns compiler and target selection. Passing
+    // these separately can make CMake discard its cache on regeneration.
+    if config.target_os != "android" && should_use_cmake_cross_compilation(config) {
         boringssl_cmake
             .define("CMAKE_CROSSCOMPILING", "true")
             .define("CMAKE_C_COMPILER_TARGET", &config.target)
@@ -268,7 +270,7 @@ fn get_boringssl_cmake_config(config: &Config) -> cmake::Config {
             .define("CMAKE_ASM_COMPILER_TARGET", &config.target);
     }
 
-    if !config.features.fips {
+    if !config.features.fips && config.target_os != "android" {
         if let Some(cc) = &config.env.cc {
             boringssl_cmake.define("CMAKE_C_COMPILER", cc);
         }
