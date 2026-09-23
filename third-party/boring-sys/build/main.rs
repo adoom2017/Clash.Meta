@@ -233,6 +233,10 @@ fn msvc_lib_subdir(config: &Config) -> Option<&'static str> {
 fn get_boringssl_cmake_config(config: &Config) -> cmake::Config {
     let src_path = get_boringssl_source_path(config);
     let mut boringssl_cmake = cmake::Config::new(src_path);
+    // The Rust crate links only libcrypto and libssl. BoringSSL's test and
+    // benchmark targets add configure-time executable probes which cannot run
+    // while cross-compiling for Android.
+    boringssl_cmake.define("BUILD_TESTING", "OFF");
 
     if config.env.cmake_toolchain_file.is_some() {
         return boringssl_cmake;
