@@ -125,7 +125,8 @@ integration, third-party VPN applications, or Windows/macOS runtime behavior.
 - Simulated C host tests cover live ICMP packets, buffer retries, notification
   reentry rejection, no callbacks after stop and independent checked handles.
 - Android arm64 builds release static and dynamic FFI libraries with Rust 1.93.1, NDK
-  27.0.12077973 and API 24. `scripts/check-mobile.ps1` reproduces the build.
+  27.0.12077973 and API 24. On macOS/Linux, `scripts/check-mobile.sh` reproduces
+  the build; Windows uses `scripts/check-mobile.ps1`.
 - iOS build attempted on Windows but blocked at ring's C compilation: Xcode
   `xcrun` and iPhoneOS SDK are unavailable. Run the iOS script on a Mac with Xcode.
 

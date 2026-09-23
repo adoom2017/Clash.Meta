@@ -24,7 +24,7 @@ try {
         Copy-Item -LiteralPath (Join-Path $workspace $name) -Destination $snapshot -Recurse
     }
     New-Item -ItemType Directory -Path (Join-Path $snapshot 'scripts'), (Join-Path $snapshot 'docs'), (Join-Path $snapshot '.cargo') | Out-Null
-    foreach ($name in @('prepare-offline.ps1', 'verify-offline.ps1', 'verify-offline-linux.sh', 'test-vless.ps1', 'check-boringssl-toolchain.ps1', 'check-mobile.ps1', 'package-release.ps1', 'test-desktop-linux.py')) {
+    foreach ($name in @('prepare-offline.ps1', 'prepare-offline.sh', 'verify-offline.ps1', 'verify-offline.sh', 'verify-offline-linux.sh', 'test-vless.ps1', 'test-vless.sh', 'check-boringssl-toolchain.ps1', 'check-mobile.ps1', 'check-mobile.sh', 'package-release.ps1', 'package-release.sh', 'test-desktop-linux.py')) {
         Copy-Item -LiteralPath (Join-Path $PSScriptRoot $name) -Destination (Join-Path $snapshot 'scripts')
     }
     foreach ($name in @('rust-progress.md', 'continuation.md', 'handoff.md', 'vless-protocol.md', 'hysteria2-protocol.md', 'offline-build.md', 'core-runtime.md', 'platform-runtime.md', 'compatibility.md', 'release.md')) {

@@ -212,10 +212,10 @@ cargo test -p meta-protocol \
   tls::tests::firefox_151_client_hello_matches_catalog -- --exact
 ```
 
-创建本机 release 包需要 PowerShell 7：
+创建本机 release 包使用 Bash 和 Python 3，无需 PowerShell：
 
 ```bash
-pwsh ./scripts/package-release.ps1
+bash scripts/package-release.sh
 ```
 
 脚本按当前架构生成单架构包。仓库尚未自动创建 Universal Binary，也未执行

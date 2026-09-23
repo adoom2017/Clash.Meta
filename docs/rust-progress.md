@@ -62,7 +62,8 @@ protocol crash. See `vless-protocol.md` for commands, limits and exact coverage.
   workspace tests: 34 passed, 2 official-oracle tests intentionally ignored.
 - [x] Changed source file rejected by checksum verification before compilation.
 
-`scripts/prepare-offline.ps1` creates the portable source archive; verification
+`scripts/prepare-offline.ps1` (Windows) or `scripts/prepare-offline.sh`
+(macOS/Linux) creates the portable source archive; verification
 commands and the exact tested archive hash are in `docs/offline-build.md`.
 OS compiler/linker and Rust toolchain prerequisites are not bundled. The fuzz
 workspace uses a separate toolchain/lockfile and is not part of this archive.

@@ -126,8 +126,13 @@ SHA-256 values before running the two suites:
 - Executable SHA-256: `c478ce1f56ff0b09ad804868e16bf4bbc4020a7f1f09c2ae9df20f5068c8e23a`
 - Banner: `Xray 25.9.11`, commit `3edfb0e`, Go 1.25.1, Windows amd64.
 
-For an independently verified official binary on another host, set its absolute
-path and run (or use `./scripts/test-vless.ps1 -XrayPath ...`):
+For an independently verified official binary on macOS or Linux, run:
+
+```bash
+bash scripts/test-vless.sh /absolute/path/to/official-xray
+```
+
+On Windows, set its absolute path and run (or use `./scripts/test-vless.ps1 -XrayPath ...`):
 
 ```powershell
 $env:XRAY_BIN = 'C:\path\to\official-xray-v25.9.11\xray.exe'

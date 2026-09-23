@@ -61,6 +61,10 @@ rotation and controller events without exposing configured credentials.
 - [Offline source archives](docs/offline-build.md) and [third-party patches](third-party/README.md).
 - [Local release packages](docs/release.md): CLI, host libraries, licenses and hashes.
 
+Windows maintenance scripts use PowerShell 7 (`.ps1`). On macOS and Linux, run
+the corresponding Bash scripts (`.sh`) for packaging, mobile builds, offline
+snapshots and interoperability tests; see the linked guides for prerequisites.
+
 TUN must be explicitly enabled; desktop use requires root/administrator rights
 and Windows additionally needs official `wintun.dll`. An interrupted session can
 be restored with `meta-rust -d CONFIG_DIRECTORY --recover-tun`.

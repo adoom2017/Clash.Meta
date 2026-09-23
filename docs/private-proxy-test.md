@@ -1,6 +1,6 @@
 # Private configuration testing on Windows
 
-Use PowerShell 7. The script captures and discards raw CLI/curl diagnostics,
+This Windows-only test uses PowerShell 7. The script captures and discards raw CLI/curl diagnostics,
 prints only fixed messages and numeric request results, and never starts a
 service or changes the configuration, TUN, routes, or system proxy settings.
 It does not write configuration copies or diagnostic logs. The local core still

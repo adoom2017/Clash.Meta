@@ -8,11 +8,18 @@ fuzz workspace. Xray remains an optional, independently acquired test oracle.
 
 ## Prepare
 
-Requires PowerShell 7, Git, tar, and the pinned Rust 1.93.1 toolchain. Preparing
+Requires Git, tar, and the pinned Rust 1.93.1 toolchain. Windows uses PowerShell 7;
+macOS/Linux use Bash and Python 3. Preparing
 the archive may use the network to obtain missing locked registry sources:
 
 ```powershell
 ./scripts/prepare-offline.ps1
+```
+
+On macOS and Linux:
+
+```bash
+bash scripts/prepare-offline.sh
 ```
 
 The script writes a uniquely named source directory, `.tar.gz` and `.sha256`
@@ -38,6 +45,10 @@ it into a new directory outside any other Cargo workspace, then run:
 tar -xzf PATH_TO_ARCHIVE.tar.gz -C EMPTY_EXTRACTION_DIRECTORY
 pwsh -File EXTRACTED_SOURCE/scripts/verify-offline.ps1
 ```
+
+On macOS and Linux, use `bash EXTRACTED_SOURCE/scripts/verify-offline.sh`
+instead of the PowerShell command. The optional first argument selects a
+different extracted source directory.
 
 The verifier checks every inventoried source file before building. It creates a
 new empty `CARGO_HOME` and target directory, runs the pinned toolchain with

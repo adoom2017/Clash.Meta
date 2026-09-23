@@ -1,6 +1,7 @@
 # Local Release Packaging
 
-PowerShell 7, tar, Rust 1.93.1 and the host C/linker toolchain are required.
+Rust 1.93.1, tar and the host C/linker toolchain are required. Use PowerShell 7
+on Windows; macOS and Linux use Bash and Python 3.
 Desktop packages contain the CLI, C ABI static/dynamic libraries, C header,
 examples, documentation, project license and dependency license notices.
 `dependencies.json` inventories resolved foundation packages, including test and
@@ -17,17 +18,28 @@ cargo fetch --locked
 ./scripts/package-release.ps1
 ```
 
+On macOS and Linux:
+
+```bash
+cargo fetch --locked
+bash scripts/package-release.sh
+```
+
 This performs a locked offline release build and creates a unique directory and
-`.tar.gz` under ignored `dist/`. Optional `-Target` selects an installed desktop
-target with a working linker; a cross-build does not run that platform's tests.
+`.tar.gz` under ignored `dist/`. On Windows, optional `-Target` selects an
+installed desktop target. On macOS/Linux, pass an output directory and then an
+optional target as positional arguments (for example,
+`bash scripts/package-release.sh dist aarch64-apple-darwin`). A cross-build does
+not run that platform's tests.
 macOS native builds default to deployment target 12.0. Windows packages require
 the official signed x64 Wintun DLL separately for TUN operation; it is not bundled.
 
-For a release backed by archived dependency sources, prepare an offline snapshot
-with `prepare-offline.ps1`, extract it, verify it with `verify-offline.ps1`, then
-run the extracted `scripts/package-release.ps1`. Set `CARGO_TARGET_DIR` to the
+For a release backed by archived dependency sources, use the `.ps1` scripts on
+Windows or the matching `.sh` scripts on macOS/Linux: prepare a snapshot,
+extract it, verify it and run the extracted package script. Set `CARGO_TARGET_DIR` to the
 verifier's reported build directory to reuse verified release objects and supply
-`-OutputDirectory` outside the extracted source. The release manifest records
+`-OutputDirectory` (Windows) or the first Bash argument (macOS/Linux) outside
+the extracted source. The release manifest records
 the source snapshot manifest hash. Retain the matching source archive, archive
 checksums and build records with the binary package for distribution.
 
@@ -38,14 +50,21 @@ Mobile hosts build their libraries separately:
 ./scripts/check-mobile.ps1 -Platform ios -Release
 ```
 
+On macOS and Linux, use Bash instead:
+
+```bash
+bash scripts/check-mobile.sh android /path/to/ndk/27.0.12077973 --release
+bash scripts/check-mobile.sh ios --release # macOS/Xcode only
+```
+
 Android uses NDK 27.0.12077973 / API 24; iOS requires macOS/Xcode and an installed
-iPhoneOS SDK. The script restores compiler environment variables on success and
-failure. Libraries appear in the target-specific `release/` directory. Include
+iPhoneOS SDK. PowerShell restores compiler environment variables; Bash exports
+them only in the script process. Libraries appear in the target-specific `release/` directory. Include
 `crates/ffi/include/meta_rust.h` in the host integration. These commands validate
 compilation, not mobile application or VPN runtime behavior.
 
 `.github/workflows/rust.yml` runs local tests, formatting, strict Clippy and release
-packaging on Windows, Linux and Intel/Apple Silicon macOS. Separate jobs build
+packaging on Windows, Linux and macOS. Separate jobs build
 iOS arm64 on macOS and Android arm64 with the pinned NDK on Linux. The workflow
 has no artifact upload, remote release or publication step. Native privileged
 TUN tests and external protocol oracles require their documented prerequisites.
