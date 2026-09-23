@@ -1,5 +1,9 @@
 # Rewrite Handoff - 2026-09-13
 
+> macOS 接手请优先阅读 [macos-migration-handoff.md](macos-migration-handoff.md)。
+> 该文件记录 2026-09-23 的 BoringSSL-only、VLESS-only 和 TUN 最新状态；
+> 本文保留的是较早阶段的历史基线。
+
 For current task statuses and results recorded as each item completes, start with
 [continuation.md](continuation.md). This handoff retains the original baseline.
 
