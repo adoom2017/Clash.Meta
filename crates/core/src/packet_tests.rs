@@ -245,6 +245,9 @@ async fn packet_dns_hijack_returns_fake_ip_without_upstream() {
     .unwrap();
 }
 
+// Darwin rejects the intentionally over-limit datagram in sendto(2), before it
+// can reach the packet writer behavior covered here on Windows and Linux.
+#[cfg(not(target_os = "macos"))]
 #[tokio::test]
 async fn oversized_ipv6_reply_does_not_stop_packet_delivery() {
     tokio::time::timeout(Duration::from_secs(5), async {

@@ -45,7 +45,9 @@ jobs:
       - run: rustup toolchain install 1.93.1 --profile minimal --target aarch64-linux-android
       - run: cargo fetch --locked
       - name: Install pinned Android NDK
-        run: sdkmanager 'ndk;27.0.12077973'
+        run: |
+          set +o pipefail
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" 'ndk;27.0.12077973' >/dev/null
       - name: Build Android arm64 Core and FFI
         shell: pwsh
         run: ./scripts/check-mobile.ps1 -Platform android -Ndk "$env:ANDROID_HOME/ndk/27.0.12077973" -Release

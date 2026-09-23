@@ -66,19 +66,21 @@ try {
         }
         $noticeSource = "$($dependency.name)-$($dependency.version)"
         if ($licenseFiles.Count -eq 0) {
-            # These published crates omit texts held by their upstream workspace.
-            $companionName = switch ($dependency.name) {
-                'asn1-rs-impl' { 'asn1-rs' }
-                'defmt' { 'defmt' }
-                'defmt-parser' { 'defmt' }
-                default { throw "No license notices archived for $($dependency.name)." }
-            }
+            # Some published workspace members omit the repository-level license
+            # files. Archive them from another crate published from the same repo.
             $companion = $metadata.packages | Where-Object {
-                $_.name -eq $companionName -and $_.id -ne $dependency.id -and $_.repository -eq $dependency.repository
-            } | Sort-Object { [version]$_.version } -Descending | Select-Object -First 1
-            if ($companion) {
-                $licenseFiles = @(Get-ChildItem -LiteralPath (Split-Path $companion.manifest_path -Parent) -Filter 'LICENSE*' -File)
-                $noticeSource = "$($companion.name)-$($companion.version)"
+                $_.id -ne $dependency.id -and $dependency.repository -and $_.repository -eq $dependency.repository
+            } | Sort-Object name, { [version]$_.version } -Descending
+            foreach ($candidate in $companion) {
+                $candidateDirectory = Split-Path $candidate.manifest_path -Parent
+                $candidateLicenses = @(Get-ChildItem -LiteralPath $candidateDirectory -Force | Where-Object {
+                    $_.Name -match '^(LICENSE|LICENCE|COPYING|NOTICE|COPYRIGHT)([._-].*|S)?$'
+                })
+                if ($candidateLicenses.Count -gt 0) {
+                    $licenseFiles = $candidateLicenses
+                    $noticeSource = "$($candidate.name)-$($candidate.version)"
+                    break
+                }
             }
             if ($licenseFiles.Count -eq 0) { throw "Upstream workspace license notices missing for $($dependency.name)." }
         }
