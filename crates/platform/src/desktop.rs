@@ -23,6 +23,7 @@ pub struct Network {
     pub ipv4: Option<ExitInterface>,
     pub ipv6: Option<ExitInterface>,
     pub dns_servers: Vec<IpAddr>,
+    pub local_networks: Vec<IpNet>,
 }
 
 #[cfg(windows)]
@@ -112,15 +113,49 @@ pub fn discover(interface: Option<&str>, excluded_index: Option<u32>) -> Result<
                 })
             })
     };
+    let ipv4 = choose(false);
+    let ipv6 = choose(true);
+    let mut local_networks = Vec::new();
+    for interface in &interfaces {
+        if ipv4
+            .as_ref()
+            .is_some_and(|exit| exit.index == interface.index)
+        {
+            local_networks.extend(
+                interface
+                    .ipv4
+                    .iter()
+                    .copied()
+                    .map(IpNet::V4)
+                    .map(|prefix| prefix.trunc()),
+            );
+        }
+        if ipv6
+            .as_ref()
+            .is_some_and(|exit| exit.index == interface.index)
+        {
+            local_networks.extend(
+                interface
+                    .ipv6
+                    .iter()
+                    .copied()
+                    .map(IpNet::V6)
+                    .map(|prefix| prefix.trunc()),
+            );
+        }
+    }
+    local_networks.sort();
+    local_networks.dedup();
     let mut network = Network {
-        ipv4: choose(false),
-        ipv6: choose(true),
+        ipv4,
+        ipv6,
         dns_servers: interfaces
             .iter()
             .filter(|i| i.is_up() && Some(i.index) != excluded_index)
             .flat_map(|i| i.dns_servers.iter().copied())
             .filter(|ip| !ip.is_loopback() && !ip.is_unspecified())
             .collect(),
+        local_networks,
     };
     network.dns_servers.sort();
     network.dns_servers.dedup();
@@ -394,6 +429,27 @@ pub struct Options<'a> {
     pub capture_dns: bool,
     pub directory: &'a Path,
 }
+
+fn built_in_local_exclusions(network: &Network, ipv6: bool) -> Result<Vec<IpNet>> {
+    let mut prefixes: Vec<_> = network.local_networks.iter().map(IpNet::trunc).collect();
+    for prefix in [
+        "169.254.0.0/16",
+        "224.0.0.0/4",
+        "255.255.255.255/32",
+        "fe80::/10",
+        "ff00::/8",
+    ] {
+        let prefix: IpNet = prefix.parse()?;
+        if prefix.addr().is_ipv4() || ipv6 {
+            prefixes.push(prefix);
+        }
+    }
+    prefixes.retain(|prefix| prefix.addr().is_ipv4() || ipv6);
+    prefixes.sort();
+    prefixes.dedup();
+    Ok(prefixes)
+}
+
 impl DesktopTun {
     pub fn open(options: Options<'_>) -> Result<Self> {
         let transaction = Transaction::open(options.directory)?;
@@ -452,7 +508,7 @@ impl DesktopTun {
             });
         }
         if self.capture_dns {
-            for ip in network.dns_servers {
+            for ip in network.dns_servers.iter().copied() {
                 if ip.is_ipv6() && !self.ipv6 {
                     continue;
                 }
@@ -461,6 +517,24 @@ impl DesktopTun {
                     interface: self.tunnel.clone(),
                 });
             }
+        }
+        for prefix in built_in_local_exclusions(&network, self.ipv6)? {
+            let interface = if prefix.addr().is_ipv4() {
+                &network.ipv4
+            } else {
+                &network.ipv6
+            };
+            let Some(interface) = interface else {
+                continue;
+            };
+            let mut interface = interface.clone();
+            // These destinations are on-link. Sending them through the default
+            // gateway can break limited broadcast and neighbor discovery.
+            interface.gateway = None;
+            routes.push(RouteSpec {
+                network: prefix,
+                interface,
+            });
         }
         for prefix in &self.exclusions {
             let interface = if prefix.addr().is_ipv4() {
@@ -554,6 +628,27 @@ mod tests {
             .unwrap();
         assert!(interface_metric(loopback.index, false).is_ok());
         assert!(interface_metric(u32::MAX, false).is_err());
+    }
+    #[test]
+    fn local_routes_are_excluded_from_tun_by_default() {
+        let network = Network {
+            local_networks: vec![
+                "192.168.2.60/24".parse::<IpNet>().unwrap(),
+                "2001:db8:1::20/64".parse::<IpNet>().unwrap(),
+            ],
+            ..Network::default()
+        };
+        let ipv4 = built_in_local_exclusions(&network, false).unwrap();
+        assert!(ipv4.contains(&"192.168.2.0/24".parse().unwrap()));
+        assert!(ipv4.contains(&"169.254.0.0/16".parse().unwrap()));
+        assert!(ipv4.contains(&"224.0.0.0/4".parse().unwrap()));
+        assert!(ipv4.contains(&"255.255.255.255/32".parse().unwrap()));
+        assert!(!ipv4.iter().any(|prefix| prefix.addr().is_ipv6()));
+
+        let dual_stack = built_in_local_exclusions(&network, true).unwrap();
+        assert!(dual_stack.contains(&"2001:db8:1::/64".parse().unwrap()));
+        assert!(dual_stack.contains(&"fe80::/10".parse().unwrap()));
+        assert!(dual_stack.contains(&"ff00::/8".parse().unwrap()));
     }
     #[derive(Default)]
     struct MemoryRoutes {

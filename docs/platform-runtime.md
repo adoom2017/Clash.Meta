@@ -43,6 +43,14 @@ select the desired device. IPv4/IPv6 outbound sockets bind their physical
 interface before connecting, including proxy-server and DNS sockets. Loopback
 destinations stay local. Missing physical egress fails instead of entering TUN.
 
+Automatic routing always bypasses the selected physical interface's directly
+connected prefixes. It also bypasses IPv4 link-local (`169.254.0.0/16`),
+multicast (`224.0.0.0/4`) and limited broadcast (`255.255.255.255/32`), plus
+IPv6 link-local (`fe80::/10`) and multicast (`ff00::/8`). These routes stay in
+the operating-system data path and never enter the userspace TUN forwarder.
+`route-exclude-address` adds deployment-specific exclusions to this built-in
+set.
+
 Automatic routing adds split default routes and routes for known system DNS
 addresses; DNS packets are handled by the packet adapter. This path preserves
 system DNS settings, so restoration concerns only the routes it adds. Local
