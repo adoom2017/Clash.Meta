@@ -21,6 +21,8 @@ The vendored copy adds narrowly scoped client APIs required by the proxy core:
 - `SSL_set_reuse_x25519_key_share` makes classic and hybrid X25519 shares
   derive the same REALITY authentication key across Xray server versions.
 - X25519 and X25519MLKEM key shares implement the private-component accessor.
+- Android cross-builds force `BUILD_TESTING=OFF`; only `crypto` and `ssl` are
+  built, avoiding benchmark executable probes that cannot run on the host.
 
 The Rust crate remains version-pinned to 5.2.0. Browser profile data lives in
 `crates/protocol/src/tls.rs`; protocol implementations do not depend on BoringSSL

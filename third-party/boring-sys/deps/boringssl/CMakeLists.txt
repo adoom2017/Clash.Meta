@@ -40,6 +40,13 @@ enable_language(CXX)
 include(CTest)
 include(GNUInstallDirs)
 
+# Android is always cross-compiled by boring-sys. Its test and benchmark
+# configuration performs executable feature probes which cannot run on the
+# build host, and neither target is linked into the Rust crate.
+if(ANDROID)
+  set(BUILD_TESTING OFF CACHE BOOL "Build BoringSSL tests" FORCE)
+endif()
+
 set(INSTALL_ENABLED 1)
 
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND NOT CMAKE_CROSSCOMPILING AND
